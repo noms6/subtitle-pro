@@ -1,0 +1,18 @@
+{
+  "dark": true,
+  "accent": "teal",
+  "compact": true,
+  "bs_theme": "pulse",
+  "theme_profile": "Midnight Teal (Dark)",
+  "font_scale": 1.1,
+  "ui_lang_code": "tr",
+  "batch": 100,
+  "mm_workers": 6,
+  "parallel": false,
+  "file_workers": 2,
+  "save_next": true,
+  "out_dir": "",
+  "deepl_api_key": "",
+  "libre_url": "",
+  "libre_api_key": ""
+}

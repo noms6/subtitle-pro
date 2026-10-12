@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Linux GUI deps (virtual display, Tk, fonts)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk fonts-dejavu-core
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt
+      - name: Lint (errors only)
+        run: python -m ruff check translate_srt.py tests tools --select F821,F811,E9,PLE
+        continue-on-error: true
+      - name: Tests (Windows)
+        if: runner.os == 'Windows'
+        run: python -m pytest -rxX
+      - name: Tests (Linux, Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m pytest -rxX

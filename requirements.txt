@@ -1,0 +1,6 @@
+deep-translator==1.11.4
+ttkbootstrap>=1.10
+python-docx
+docx2txt
+pdfminer.six
+reportlab

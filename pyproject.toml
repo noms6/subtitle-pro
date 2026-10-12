@@ -1,0 +1,26 @@
+[project]
+name = "subtitle-pro"
+version = "0.1.0"
+description = "Subtitle (SRT/VTT) and document translator with a Tkinter GUI and CLI"
+requires-python = ">=3.8"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not network' -p no:cacheprovider"
+timeout = 120
+markers = [
+    "network: live tests against real translation services (opt-in: pytest -m network)",
+]
+filterwarnings = [
+    # Worker threads touch Tk from outside the main thread (known issue H4).
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]
+
+[tool.ruff]
+line-length = 140
+target-version = "py38"
+extend-exclude = ["translate_srt1.py", "graphify-out"]
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "PLE"]

@@ -1,0 +1,7 @@
+-r requirements.txt
+tkinterdnd2
+langdetect
+pytest>=8
+pytest-timeout
+ruff
+pillow

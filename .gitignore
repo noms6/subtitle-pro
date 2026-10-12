@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.spec
+*.egg-info/
+
+# User data / local state (may contain API keys)
+settings.json
+
+# Generated translation outputs and personal media
+*.srt
+*.vtt
+*.ass
+*.ssa
+!tests/fixtures/**
+
+# Tooling
+graphify-out/
+.qodo/
+.claude/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Legacy / local scratch (superseded by tests/ and tools/)
+translate_srt1.py
+test_runner.py
+test_runner_full.py

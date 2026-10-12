@@ -1,0 +1,51 @@
+1
+00:00:01,000 --> 00:00:03,200
+<i>Previously, on the night shift...</i>
+
+2
+00:00:03,500 --> 00:00:06,000
+Did anyone check the back door?
+- I locked it myself.
+
+3
+00:00:06,400 --> 00:00:08,100
+Then who opened it?
+
+4
+00:00:08,500 --> 00:00:10,900
+Nobody leaves this room
+until we find out.
+
+5
+00:00:11,200 --> 00:00:12,300
+2024
+
+6
+00:00:12,600 --> 00:00:14,800
+Note to self: never volunteer again.
+
+7
+00:00:15,000 --> 00:00:17,500
+{\an8}[DOOR CREAKS]
+
+8
+00:00:17,900 --> 00:00:20,000
+<b>Stop!</b> Don't move.
+
+9
+00:00:20,300 --> 00:00:22,700
+The server error page
+was a message for us.
+
+10
+00:00:23,000 --> 00:00:25,000
+Then who opened it?
+
+11
+00:00:25,400 --> 00:00:28,900
+We have until sunrise to figure out
+what is going on in this building.
+
+12
+00:00:29,200 --> 00:00:31,000
+<i>To be continued.</i>
