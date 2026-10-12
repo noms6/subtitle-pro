@@ -43,19 +43,26 @@ tests/
 - [x] GitHub Actions (Windows + Ubuntu/Xvfb, Python 3.10/3.12)
 - [x] `tools/benchmark.py`
 
+## Faz 1a — Arayüz ve dil ✅ (`ui-overhaul`)
+- [x] İki sütunlu düzen, düz paneller, temaya uyan ilerleme halkası, kırpılmayan simge araç çubuğu
+- [x] 37 dil paketi eşitlendi (çöp/kullanılmayan anahtarlar silindi, eksikler dolduruldu, 36 dil için elle kontrol edilmiş terimler)
+- [x] Emoji önekli arama, bellek içi önbellek, gömülü Türkçe metinler kaldırıldı, yerel dil adları, 133 hedef dil adı
+- [x] H4 worker↔Tk kuyruğu, H27, H38, H10/H11, H42, fare tekerleği, log filtreleri, ☰ menüsü
+- [ ] RTL yerleşim (H69), ikincil diyalogların denetimi (H70), anadili konuşanlarca çeviri incelemesi
+
 ## Faz 1 — Doğruluk ve güvenlik (1–2 gün) · *ilk sürümden önce şart*
 - [ ] **H1** Başarısız satırı asla başarı sayma; motor zinciri; "Kısmi" durum; CLI çıkış kodu (H35)
 - [ ] **H3** Thread başına translator
-- [ ] **H4/H42** `RunConfig` + kuyruk tabanlı UI güncelleme; hata diyaloğu ana thread'de; log'a artımlı ekleme
-- [ ] **H27** `err = str(e)` ile lambda'yı düzelt
+- [x] **H4/H42** Ayar anlık görüntüsü + kuyruk tabanlı UI güncelleme; hata diyaloğu ana thread'de; log'a artımlı ekleme
+- [x] **H27** Mesaj `except` içinde bağlanıyor
 - [ ] **H50/H22** Import sırasında kurulum yok; eksik paket yalnızca özellik kullanılınca, onayla, `venv` içine
 - [ ] **H41** `os.system` yerine `subprocess.run([...])` (liste argüman)
 - [ ] **H51** Tüm HTTP isteklerine timeout; iptal beklemedeki isteği kessin
-- [ ] **H5/H6/H7** Dil listesi instance'dan; `_rebuild_target_lang_names` sınıfa; varsayılan hedef dil kodla (`tr`)
+- [x] **H5/H6/H7** Dil listesi instance'dan; `_rebuild_target_lang_names` sınıfa; varsayılan hedef dil kodla
 - [ ] **H8/H32/H9** MyMemory tam ISO eşlemesi + kaynak dil; mymemory_first'te Google yedeği; DeepL Web kaldır veya bağla
-- [ ] **H10/H11/H38** Ayarları birleştirerek kaydet, eksik ayarları ekle, `.get()`, tema yükleme sırası
+- [x] **H10/H11/H38** Ayarları birleştirerek kaydet, eksik ayarları ekle, `.get()`, tema yükleme sırası
 - [ ] **H14/H44/H45** İptalde `.partial`, var olan çıktı için sor/yedekle, eksik dosyada hata
-- [ ] **H20/H21** Import yan etkilerini ve açılış ağ isteklerini kaldır
+- [ ] **H20** Import yan etkileri · [x] **H21** Açılış ağ istekleri kaldırıldı
 
 ## Faz 2 — Performans (1–2 gün)
 - [ ] `GoogleBatchEngine`: ≤4.500 karakterlik birleşik istek, `requests.Session`, JSON endpoint, satır sayısı doğrulama, uyuşmazlıkta ikiye bölerek yeniden deneme → **istek sayısı ~175× az** (H2)

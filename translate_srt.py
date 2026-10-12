@@ -5,6 +5,7 @@ import sys
 import time
 import traceback
 import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Optional, Callable, Dict
 import shutil
@@ -548,20 +549,30 @@ except Exception:
     docx2txt = None  # type: ignore
 
 
+# code -> English display name, filled from the translator's supported-language list
+_LANG_NAMES_EN: Dict[str, str] = {}
+
+
 def _get_supported_langs(ui_code: Optional[str] = None) -> Dict[str, str]:
     """Return mapping of 'Language Name' → 'code' for GoogleTranslator.
     Fallback to a curated subset if discovery fails.
     """
     try:
-        langs = GoogleTranslator.get_supported_languages(as_dict=True)  # type: ignore[attr-defined]
-        # deep_translator returns code->name or name->code depending on version.
-        # Normalize to name->code.
-        if isinstance(langs, dict):
-            # Detect orientation
-            sample_key = next(iter(langs.keys())) if langs else ""
-            if len(sample_key) == 2 or sample_key.lower() == sample_key:  # likely code->name
-                return {v.title(): k for k, v in langs.items()}
-            return {k.title(): v for k, v in langs.items()}
+        # get_supported_languages is an instance method (calling it on the class raised
+        # TypeError and silently fell back to 37 languages).
+        langs = GoogleTranslator(source="auto", target="en").get_supported_languages(as_dict=True)
+        if isinstance(langs, dict) and langs:
+            # deep_translator returns {"english name": "code"}; older versions the reverse.
+            k0, v0 = next(iter(langs.items()))
+            name_to_code = langs if len(str(v0)) <= len(str(k0)) else {v: k for k, v in langs.items()}
+            result = {}
+            for name, code in name_to_code.items():
+                pretty = " ".join(w if w.startswith("(") else w.capitalize() for w in str(name).split())
+                pretty = re.sub(r"\((\w)", lambda m: "(" + m.group(1).upper(), pretty)
+                result[pretty] = str(code)
+                _LANG_NAMES_EN.setdefault(str(code), pretty)
+            if len(result) > 50:
+                return result
     except Exception:
         pass
     # Fallback common languages
@@ -685,6 +696,98 @@ _UI_CACHE_FILE = os.path.join(os.path.dirname(__file__), "ui_translations.json")
 _SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
 _BUILTIN_UI: Dict[str, Dict[str, str]] = {}
 _CURRENT_UI_LANG_CODE: Optional[str] = None
+
+# ---- UI language packs: loaded once, reloaded only when the file changes ----
+_UI_PACKS_CACHE: Dict[str, object] = {"mtime": None, "data": {}}
+_UI_AFFIX_RE = re.compile(r"^([^\w(\[]*)(.*?)(\s*)$", re.S)
+
+# Native names (autonyms) for the UI-language picker, so users can find their language
+UI_LANG_AUTONYMS: Dict[str, str] = {
+    "ar": "العربية", "bg": "Български", "cs": "Čeština", "da": "Dansk", "de": "Deutsch",
+    "el": "Ελληνικά", "en": "English", "es": "Español", "et": "Eesti", "fa": "فارسی",
+    "fi": "Suomi", "fr": "Français", "hi": "हिन्दी", "hr": "Hrvatski", "hu": "Magyar",
+    "id": "Bahasa Indonesia", "it": "Italiano", "ja": "日本語", "ko": "한국어", "lt": "Lietuvių",
+    "lv": "Latviešu", "nl": "Nederlands", "no": "Norsk", "pl": "Polski", "pt": "Português",
+    "ro": "Română", "ru": "Русский", "sk": "Slovenčina", "sl": "Slovenščina", "sr": "Српски",
+    "sv": "Svenska", "th": "ไทย", "tr": "Türkçe", "uk": "Українська", "vi": "Tiếng Việt",
+    "zh-CN": "简体中文", "zh-TW": "繁體中文",
+}
+
+
+# UI strings that reach _tr() through variables (tooltips, menus, engine list, status words).
+# tools/i18n_sync.py extracts these together with every literal _tr("...") call.
+UI_EXTRA_KEYS: List[str] = [
+    "Remove missing", "Preview", "Open selected output", "Open selected out folder", "Reveal in Explorer",
+    "Advanced settings...", "Type to filter by filename", "Auto",
+    "Google first, MyMemory as fallback", "Google Translate (no key)", "MyMemory (no key, small daily quota)",
+    "DeepL API (requires API key)", "DeepL website automation (experimental)", "LibreTranslate (self-hosted or API key)",
+    "Start translation (Ctrl+R)", "Cancel (Esc)", "Translate only the selected files (Ctrl+Shift+R)",
+    "Add files (Ctrl+O)", "Remove selected files from the list",
+    "Add...", "Output settings...", "Preferences...", "Compact mode", "Font size", "About", "Exit",
+    "Translating", "Completed", "Canceled", "Skipped", "Skipped (same language)", "Error", "Translation failed",
+    "Unsupported extension", "Light mode", "Dark mode", "Blue", "Purple", "Green", "Orange", "Pink", "Teal",
+    "Words", "Elapsed", "Remaining", "s",
+]
+
+
+_LANG_NAMES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lang_names.json")
+_LANG_NAMES_CACHE: Dict[str, object] = {"mtime": None, "data": {}}
+
+
+def _lang_names_for(ui_code: str) -> Dict[str, str]:
+    """Localized target-language names for a UI language (built by tools/i18n_sync.py --lang-names)."""
+    try:
+        mtime = os.path.getmtime(_LANG_NAMES_FILE)
+        if _LANG_NAMES_CACHE["mtime"] != mtime:
+            with open(_LANG_NAMES_FILE, "r", encoding="utf-8") as rf:
+                _LANG_NAMES_CACHE["data"] = json.load(rf) or {}
+            _LANG_NAMES_CACHE["mtime"] = mtime
+        data = _LANG_NAMES_CACHE["data"]
+        return data.get(ui_code) or data.get(str(ui_code).split("-")[0]) or {}  # type: ignore[union-attr]
+    except Exception:
+        return {}
+
+def _load_ui_packs() -> Dict[str, Dict[str, str]]:
+    """Return ui_translations.json as a dict, parsing it only when the file changes."""
+    try:
+        mtime = os.path.getmtime(_UI_CACHE_FILE)
+    except OSError:
+        return {}
+    if _UI_PACKS_CACHE["mtime"] != mtime:
+        try:
+            with open(_UI_CACHE_FILE, "r", encoding="utf-8") as rf:
+                data = json.load(rf) or {}
+        except Exception:
+            data = {}
+        _UI_PACKS_CACHE["data"] = data if isinstance(data, dict) else {}
+        _UI_PACKS_CACHE["mtime"] = mtime
+    return _UI_PACKS_CACHE["data"]  # type: ignore[return-value]
+
+
+def _ui_pack_for(code: str) -> Dict[str, str]:
+    packs = _load_ui_packs()
+    pack = packs.get(code) or packs.get(code.split("-")[0])
+    if not pack:
+        base = code.split("-")[0]
+        pack = next((v for k, v in packs.items() if k.split("-")[0] == base), None)
+    return pack if isinstance(pack, dict) else {}
+
+
+def _ui_translate(text: str, code: str) -> str:
+    """Translate a UI string. Leading icons/emoji and surrounding spaces are kept as-is, so
+    "📂 Add..." is looked up as "Add..." and returned as "📂 <translation>"."""
+    if not text or code == "en":
+        return text
+    pack = _ui_pack_for(code)
+    hit = pack.get(text)
+    if hit:
+        return hit
+    m = _UI_AFFIX_RE.match(text)
+    if m and m.group(2):
+        hit = pack.get(m.group(2))
+        if hit:
+            return f"{m.group(1)}{hit}{m.group(3)}"
+    return text
 
 # Optional API credentials (read from env and settings.json if present)
 _DEEPL_API_KEY: Optional[str] = os.environ.get("DEEPL_API_KEY")
@@ -848,7 +951,7 @@ def _localize_lang_name(code: str, ui_code: str) -> str:
             "sk": "Slovak", "da": "Danish", "fi": "Finnish", "no": "Norwegian", "sr": "Serbian",
             "lt": "Lithuanian", "lv": "Latvian", "et": "Estonian", "sl": "Slovene",
         }
-        base = name_en_map.get(code, code)
+        base = name_en_map.get(code) or _LANG_NAMES_EN.get(code) or _lang_names_for("en").get(code) or code
         # Quick built-in localization for some UI languages
         ui = (ui_code or "en").lower()
         if ui.startswith("en"):
@@ -866,7 +969,7 @@ def _localize_lang_name(code: str, ui_code: str) -> str:
             return en_map.get(code, base)
         if ui.startswith("tr"):
             tr_map = {
-                "en": "İngilizce", "tr": "Türkçe", "es": "İspanyolca", "de": "Alman", "fr": "Fransızca",
+                "en": "İngilizce", "tr": "Türkçe", "es": "İspanyolca", "de": "Almanca", "fr": "Fransızca",
                 "it": "İtalyanca", "pt": "Portekizce", "nl": "Felemenkçe", "sv": "İsveççe", "pl": "Lehçe",
                 "ru": "Rusça", "uk": "Ukraynaca", "bg": "Bulgarca", "el": "Yunanca", "ar": "Arapça",
                 "fa": "Farsça", "hi": "Hintçe", "ja": "Japonca", "ko": "Korece",
@@ -874,88 +977,21 @@ def _localize_lang_name(code: str, ui_code: str) -> str:
                 "hu": "Macarca", "id": "Endonezce", "th": "Tayca", "vi": "Vietnamca", "hr": "Hırvatça",
                 "sk": "Slovakça", "da": "Danca", "fi": "Fince", "no": "Norveççe", "sr": "Sırpça",
                 "lt": "Litvanca", "lv": "Letonca", "et": "Estonca", "sl": "Slovence",
+                "az": "Azerice", "kk": "Kazakça", "ky": "Kırgızca", "uz": "Özbekçe", "tk": "Türkmence",
+                "tt": "Tatarca", "ug": "Uygurca", "ku": "Kürtçe (Kurmanci)", "ckb": "Kürtçe (Sorani)",
+                "sq": "Arnavutça", "bs": "Boşnakça", "mk": "Makedonca", "ka": "Gürcüce", "hy": "Ermenice",
+                "iw": "İbranice", "he": "İbranice", "ur": "Urduca", "bn": "Bengalce", "pa": "Pencapça",
+                "ta": "Tamilce", "ms": "Malayca", "tl": "Filipince", "sw": "Svahili", "so": "Somalice",
+                "am": "Amharca", "ca": "Katalanca", "eu": "Baskça", "gl": "Galiçyaca", "is": "İzlandaca",
+                "ga": "İrlandaca", "cy": "Galce", "af": "Afrikaanca", "la": "Latince", "eo": "Esperanto",
+                "be": "Belarusça", "mt": "Maltaca", "mn": "Moğolca", "ne": "Nepalce", "ps": "Peştuca",
+                "yi": "Yidiş", "lb": "Lüksemburgca",
             }
-            return tr_map.get(code, base)
-        # Diğer tüm UI dilleri için: İngilizce adları kullan
-        return base
+            return tr_map.get(code) or _lang_names_for("tr").get(code) or base
+        # Other UI languages: generated names (lang_names.json), else English
+        return _lang_names_for(ui_code).get(code) or base
     except Exception:
         return code
-
-def _rebuild_ui_lang_names(self) -> None:
-    """Recompute localized UI language display names from codes for current UI language."""
-    try:
-        names: list[str] = []
-        name_to_code: Dict[str, str] = {}
-        for code in self.ui_codes:
-            disp = _localize_lang_name(code, self.ui_lang_code)
-            # Ensure uniqueness
-            label = disp
-            suffix = 2
-            while label in name_to_code and name_to_code[label] != code:
-                label = f"{disp} ({suffix})"
-                suffix += 1
-            name_to_code[label] = code
-            names.append(label)
-        # Sort stable
-        names = sorted(names, key=lambda s: s.casefold())
-        self.ui_lang_map = {n: name_to_code[n] for n in names}
-        self.ui_lang_names = names
-        # Adjust current selection if code present
-        try:
-            cur_code = self.ui_lang_code
-            if cur_code in self.ui_lang_map.values():
-                cur_name = next((n for n,c in self.ui_lang_map.items() if c == cur_code), None)
-                if cur_name:
-                    self.ui_lang_var.set(cur_name)
-        except Exception:
-            pass
-    except Exception:
-        # fallback to English only
-        self.ui_lang_map = {"English": "en"}
-        self.ui_lang_names = ["English"]
-
-
-    def _rebuild_target_lang_names(self) -> None:
-        """Build localized target language display names from self.lang_map values and current UI language."""
-        try:
-            code_set = sorted(set(self.lang_map.values()))
-            names: list[str] = []
-            name_to_code: Dict[str, str] = {}
-            for code in code_set:
-                disp = _localize_lang_name(code, self.ui_lang_code)
-                label = disp
-                suffix = 2
-                while label in name_to_code and name_to_code[label] != code:
-                    label = f"{disp} ({suffix})"
-                    suffix += 1
-                name_to_code[label] = code
-                names.append(label)
-            names = sorted(names, key=lambda s: s.casefold())
-            self.target_lang_map = {n: name_to_code[n] for n in names}
-            self.target_lang_names = names
-            # Preserve current selection by code if possible
-            try:
-                cur_name = self.target_lang_var.get()
-                # Determine current code from either the localized map or the base English map
-                cur_code = None
-                if getattr(self, 'target_lang_map', None):
-                    cur_code = self.target_lang_map.get(cur_name)
-                if not cur_code:
-                    cur_code = self.lang_map.get(cur_name)
-                if cur_code:
-                    new_name = next((n for n,c in self.target_lang_map.items() if c == cur_code), None)
-                    if new_name:
-                        self.target_lang_var.set(new_name)
-            except Exception:
-                pass
-        except Exception:
-            # Fallback to English names if anything fails
-            try:
-                self.target_lang_map = {k: v for k,v in sorted(self.lang_map.items(), key=lambda kv: kv[0].casefold())}
-                self.target_lang_names = list(self.target_lang_map.keys())
-            except Exception:
-                self.target_lang_map = {}
-                self.target_lang_names = []
 
 def _prebuild_ui_packs(codes: List[str]) -> None:
     try:
@@ -1589,7 +1625,7 @@ def translate_docx_file(
                 return outp_txt
             except Exception:
                 pass
-        raise RuntimeError("python-docx yüklü değil (pip install python-docx) veya dosya açılamadı")
+        raise RuntimeError("python-docx is not installed (pip install python-docx) or the file could not be opened")
     # python-docx bazı bozuk/office paketlenmemiş dosyalarda PackageNotFoundError fırlatır; yakala ve fallback dene
     try:
         doc = DocxDocument(path)
@@ -1707,7 +1743,7 @@ def translate_pdf_file(
     as_text: bool = False,
 ) -> str:
     if pdf_extract_text is None:
-        raise RuntimeError("pdfminer.six yüklü değil (pip install pdfminer.six)")
+        raise RuntimeError("pdfminer.six is not installed (pip install pdfminer.six)")
     # Extract text only; ignore images/shapes, just textual content
     text = pdf_extract_text(path) or ""
     # Early language detect – skip if already in target language
@@ -1739,7 +1775,7 @@ def translate_pdf_file(
         return outp_txt
 
     if rl_canvas is None or A4 is None:
-        raise RuntimeError("reportlab yüklü değil (pip install reportlab)")
+        raise RuntimeError("reportlab is not installed (pip install reportlab)")
     outp = _out_path_same_ext(path, target_lang)
     # Normalize whitespace – collapse multiple blank lines, trim trailing spaces
     norm_lines = []
@@ -1866,15 +1902,19 @@ class _Tooltip:
 
 
 class _CircularProgress(ttk.Frame):
-    def __init__(self, parent, size: int = 160, thickness: int = 14) -> None:
+    """Progress ring with the percentage drawn in the centre; colours follow the theme."""
+
+    def __init__(self, parent, size: int = 160, thickness: int = 12) -> None:
         super().__init__(parent)
         self.size = size
         self.thickness = thickness
         self.color = "#3d7bfd"
+        self.track = "#e2e8f0"
+        self.text_color = "#1f2937"
         self.canvas = tk.Canvas(self, width=size, height=size, highlightthickness=0, bd=0)
-        self.canvas.pack(pady=(6, 4))
+        self.canvas.pack(pady=(4, 2))
+        # kept for API compatibility (percentage is now drawn inside the ring)
         self.lbl_pct = ttk.Label(self, text="0%")
-        self.lbl_pct.pack()
         try:
             eta_label = self.master._tr("ETA") + ": --:--"  # type: ignore[attr-defined]
         except Exception:
@@ -1882,20 +1922,31 @@ class _CircularProgress(ttk.Frame):
         self.lbl_eta = ttk.Label(self, text=eta_label)
         self.lbl_eta.pack()
         self._percent = 0
+        self._sync_bg()
         self._draw(0)
+
+    def _sync_bg(self) -> None:
+        try:
+            bg = ttk.Style().lookup("TFrame", "background") or self.winfo_toplevel().cget("bg")
+            self.canvas.configure(bg=bg)
+            fg = ttk.Style().lookup("TLabel", "foreground") or "#1f2937"
+            self.text_color = fg
+            self.track = TranslatorGUI._mix(self, bg, fg, 0.12)
+        except Exception:
+            pass
 
     def _draw(self, percent: int) -> None:
         self.canvas.delete("all")
-        radius = self.size / 2
-        x0 = y0 = self.thickness / 2 + 2
-        x1 = y1 = self.size - self.thickness / 2 - 2
+        pad = self.thickness / 2 + 2
+        x0 = y0 = pad
+        x1 = y1 = self.size - pad
         try:
-            self.canvas.create_oval(x0, y0, x1, y1, outline="#3a3a3a", width=self.thickness)
-        except Exception:
-            pass
-        extent = percent * 3.6
-        try:
-            self.canvas.create_arc(x0, y0, x1, y1, start=90, extent=-extent, style=tk.ARC, outline=self.color, width=self.thickness, capstyle=tk.ROUND)
+            self.canvas.create_oval(x0, y0, x1, y1, outline=self.track, width=self.thickness)
+            if percent > 0:
+                self.canvas.create_arc(x0, y0, x1, y1, start=90, extent=-min(359.9, percent * 3.6), style=tk.ARC,
+                                       outline=self.color, width=self.thickness)
+            self.canvas.create_text(self.size / 2, self.size / 2, text=f"{percent}%", fill=self.text_color,
+                                    font=("Segoe UI", max(12, self.size // 7), "bold"))
         except Exception:
             pass
 
@@ -1911,11 +1962,13 @@ class _CircularProgress(ttk.Frame):
 
     def set_color(self, color: str) -> None:
         self.color = color
+        self._sync_bg()
         self._draw(self._percent)
 
 
 class _RoundedCard(ttk.Frame):
-    def __init__(self, parent, radius: int = 20, margin: int = 12, fill: str = "#ffffff", shadow: str = "#000000", shadow_offset: int = 5, min_height: int = 96) -> None:
+    # shadow_offset=0 draws a 1px outline instead of a drop shadow (flat panel look)
+    def __init__(self, parent, radius: int = 12, margin: int = 6, fill: str = "#ffffff", shadow: str = "#d6dce6", shadow_offset: int = 0, min_height: int = 96) -> None:
         super().__init__(parent)
         self.radius = radius
         self.margin = margin
@@ -1990,12 +2043,13 @@ class _RoundedCard(ttk.Frame):
             w = max(1, self.canvas.winfo_width())
             h = max(self.min_height, self.canvas.winfo_height())
             r = max(0, min(self.radius, int(min(w, h) * 0.2)))
-            # shadow
-            sx = self.margin + self.shadow_offset
-            sy = self.margin + self.shadow_offset
-            ex = w - self.margin + self.shadow_offset
-            ey = h - self.margin + self.shadow_offset
-            self._rounded_rect(sx, sy, ex, ey, r, self.shadow)
+            # shadow (offset > 0) or 1px outline (offset == 0)
+            grow = 1 if self.shadow_offset == 0 else 0
+            sx = self.margin + self.shadow_offset - grow
+            sy = self.margin + self.shadow_offset - grow
+            ex = w - self.margin + self.shadow_offset + grow
+            ey = h - self.margin + self.shadow_offset + grow
+            self._rounded_rect(sx, sy, ex, ey, r + grow, self.shadow)
             # card
             x1 = self.margin
             y1 = self.margin
@@ -2034,10 +2088,20 @@ class _ScrollableFrame(ttk.Frame):
         self._win_id = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._on_content)
         self.canvas.bind("<Configure>", self._on_canvas)
-        # Mouse wheel support
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
-        self.canvas.bind_all("<Button-4>", self._on_wheel)
-        self.canvas.bind_all("<Button-5>", self._on_wheel)
+        # Mouse wheel: active only while the pointer is over this frame, so other
+        # scrollable areas (dialogs, lists) keep their own wheel handling.
+        self.bind("<Enter>", self._bind_wheel)
+        self.bind("<Leave>", self._unbind_wheel)
+
+    _SELF_SCROLLING = ("Text", "Treeview", "Listbox", "TCombobox", "Spinbox", "TSpinbox")
+
+    def _bind_wheel(self, _e=None):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.canvas.bind_all(seq, self._on_wheel)
+
+    def _unbind_wheel(self, _e=None):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.canvas.unbind_all(seq)
 
     def _on_content(self, _e=None):
         try:
@@ -2055,6 +2119,11 @@ class _ScrollableFrame(ttk.Frame):
 
     def _on_wheel(self, event):
         try:
+            w = getattr(event, "widget", None)
+            if w is not None and hasattr(w, "winfo_class") and w.winfo_class() in self._SELF_SCROLLING:
+                return
+            if self.canvas.yview() == (0.0, 1.0):
+                return  # everything visible, nothing to scroll
             if hasattr(event, 'delta') and event.delta:
                 self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
             elif hasattr(event, 'num'):
@@ -2080,7 +2149,7 @@ class TranslatorGUI:
         self.root.lift()
         self.root.attributes("-topmost", True)
         self.root.after(10, lambda: self.root.attributes("-topmost", False))
-        self.root.title("Altyazı Çeviri - GoogleTranslator")
+        self.root.title("Subtitle PRO")
         # Başlık çubuğunu koyu yapmayı dene (hemen, kök pencere oluşunca)
         try:
             _enable_win_dark_titlebar(self.root.winfo_id(), True)
@@ -2278,19 +2347,17 @@ class TranslatorGUI:
         # Skip files that already appear to be in target language
         self.skip_same_lang_var = tk.BooleanVar(value=True)
 
+        self._log_queue: "queue.Queue[Callable[[], object]]" = queue.Queue()
         self._build_ui()
         self._load_settings()
-        # Prebuild UI packs for a few common languages on first launch (run in background)
-        try:
-            common_codes = ["tr","de","fr","es","it","ru","ar","pt","ja","ko","zh-CN","zh-TW","fa","hi","nl","pl","sv","uk","el","bg"]
-            # Build minimal packs and ensure JSON contains all UI texts
-            threading.Thread(target=lambda: (_prebuild_ui_packs(common_codes), _ensure_ui_json_has_all_texts(common_codes)), daemon=True).start()
-        except Exception:
-            pass
+        self.root.after(100, self._drain_log_queue)
+        # UI language packs ship with the app (ui_translations.json). They used to be
+        # re-translated through Google on every launch, which burned the rate limit;
+        # regenerate them explicitly with:  translate_srt.py --build-ui-json
 
         # --- Custom Fluent Titlebar ---
         bg_color = self._bs.colors.bg if getattr(self, '_bs', None) is not None else self.root.cget('bg')
-        fg_color = self._bs.colors.fg if getattr(self, '_bs', None) is not None else '#ffffff'
+        fg_color = self._contrast_fg(self.root, bg_color)
         self.titlebar = tk.Frame(self.root, bg=bg_color, relief="flat", height=32)
         self.titlebar.place(x=0, y=0, relwidth=1)
 
@@ -2307,7 +2374,7 @@ class TranslatorGUI:
         btn_frame.pack(side="right", padx=(0, 6), pady=0)
 
         def close_app():
-            self.root.destroy()
+            self._on_close()  # asks for confirmation while a translation is running
 
         def minimize():
             try:
@@ -2363,7 +2430,9 @@ class TranslatorGUI:
         # --- Titlebar'ı sürükleme ---
         self.root.after(10, self.enable_drag)
 
-        # Not: Sistem menüsü (tk.Menu) kullanılmaya devam ediyor
+        # Settings are loaded after _build_ui, so re-apply everything that depends on them
+        # (previously a saved dark theme / font size / target language was ignored on start).
+        self._apply_loaded_settings()
 
     def _build_ui(self) -> None:
         pad = {"padx": 10, "pady": 6}
@@ -2414,34 +2483,70 @@ class TranslatorGUI:
         ttl = ttk.Frame(left_hdr, style="AppHeader.TFrame")
         ttl.pack(side="left")
         ttk.Label(ttl, text=self._tr("Subtitle PRO – Multi Translator"), font=("Segoe UI", 14, "bold"), style="AppHeader.TLabel").pack(anchor="w")
-        ttk.Label(ttl, text=self._tr("Batch subtitle & document translator"), style="AppHeader.TLabel").pack(anchor="w")
+        self.lbl_app_subtitle = ttk.Label(ttl, text=self._tr("Batch subtitle & document translator"), style="AppHeader.TLabel")
+        self.lbl_app_subtitle.pack(anchor="w")
         # subtle separator line under header (ttk with themed style)
+        # (separator not packed: it rendered as a stray line across the top of the header)
         self.sep_hdr = ttk.Separator(titlebar, orient="horizontal", style="AppSeparator.TSeparator")
-        self.sep_hdr.pack(fill="x", padx=14, pady=(0, 8))
         right_hdr = ttk.Frame(titlebar)
         right_hdr.pack(side="right")
         # Theme switch
         self.lbl_hdr_theme = ttk.Label(right_hdr, text=self._tr("Theme:"))
         self.lbl_hdr_theme.pack(side="left", padx=(0, 6))
+        # theme_var / accent_var hold internal keys; the comboboxes show translated labels
         self.theme_var = tk.StringVar(value=("dark" if self.dark_mode_var.get() else "light"))
-        self.cmb_theme = ttk.Combobox(right_hdr, state="readonly", width=8, values=["light", "dark"], textvariable=self.theme_var)
+        self.cmb_theme = ttk.Combobox(right_hdr, state="readonly", width=9)
         self.cmb_theme.pack(side="left", padx=(0, 12))
-        self.cmb_theme.bind("<<ComboboxSelected>>", lambda e: (self.dark_mode_var.set(self.theme_var.get()=="dark"), self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
+
+        def _on_theme_pick(_e=None):
+            dark = self.cmb_theme.current() == 1
+            self.theme_var.set("dark" if dark else "light")
+            self.dark_mode_var.set(dark)
+            self._apply_theme()
+            self._refresh_menu_bar()
+            self._refresh_status_bar()
+            self._save_settings()
+        self.cmb_theme.bind("<<ComboboxSelected>>", _on_theme_pick)
         # Accent selector
-        self.lbl_hdr_accent = ttk.Label(right_hdr, text=self._tr("Accent:"))
+        self.lbl_hdr_accent = ttk.Label(right_hdr, text=self._tr("Accent color:"))
         self.lbl_hdr_accent.pack(side="left", padx=(0, 6))
-        self.cmb_accent = ttk.Combobox(right_hdr, state="readonly", width=9, values=["blue","purple","green","orange","pink","teal"], textvariable=self.accent_var)
+        self.cmb_accent = ttk.Combobox(right_hdr, state="readonly", width=10)
         self.cmb_accent.pack(side="left", padx=(0, 12))
-        self.cmb_accent.bind("<<ComboboxSelected>>", lambda e: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
+
+        def _on_accent_pick(_e=None):
+            idx = self.cmb_accent.current()
+            if 0 <= idx < len(self.ACCENTS):
+                self.accent_var.set(self.ACCENTS[idx])
+            self._apply_theme()
+            self._refresh_menu_bar()
+            self._save_settings()
+        self.cmb_accent.bind("<<ComboboxSelected>>", _on_accent_pick)
+        self._sync_header_combos()
         # Header menu (About / Settings)
         try:
-            self.header_menu_btn = ttk.Menubutton(right_hdr, text="☰")
-            self.header_menu_btn.pack(side="left")
+            self.header_menu_btn = ttk.Menubutton(right_hdr, text="☰", width=3)
+            self.header_menu_btn.pack(side="left", padx=(0, 12))
             self.header_menu = tk.Menu(self.header_menu_btn, tearoff=False)
-            self.header_menu.add_command(label=self._tr("About"), command=self._show_about)
+            # The native menubar is invisible because the window uses overrideredirect, so
+            # everything users need must also be reachable from this header menu.
+            self.header_menu.add_command(label=self._tr("Add..."), command=self._add_files)
             self.header_menu.add_separator()
             self.header_menu.add_command(label=self._tr("Output settings..."), command=self._open_output_dialog)
             self.header_menu.add_command(label=self._tr("Advanced settings..."), command=self._open_advanced_dialog)
+            self.header_menu.add_command(label=self._tr("Preferences..."), command=self._open_preferences)
+            self.header_menu.add_separator()
+            self.header_menu.add_checkbutton(label=self._tr("Compact mode"), onvalue=True, offvalue=False, variable=self.compact_mode_var,
+                                             command=lambda: (self._apply_theme(), self._save_settings()))
+            self.header_font_menu = tk.Menu(self.header_menu, tearoff=False)
+            for scale in (0.9, 1.0, 1.1, 1.2, 1.3):
+                self.header_font_menu.add_radiobutton(label=f"{int(scale*100)}%", value=scale, variable=self.font_scale_var,
+                                                      command=lambda: (self._apply_font_scale(), self._save_settings()))
+            self.header_menu.add_cascade(label=self._tr("Font size"), menu=self.header_font_menu)
+            self.header_menu.add_separator()
+            self.header_menu.add_command(label=self._tr("About"), command=self._show_about)
+            self.header_menu.add_command(label=self._tr("Exit"), command=self._on_close)
+            self._header_menu_keys = [(0, "Add..."), (2, "Output settings..."), (3, "Advanced settings..."),
+                                      (4, "Preferences..."), (6, "Compact mode"), (7, "Font size"), (9, "About"), (10, "Exit")]
             self.header_menu_btn.configure(menu=self.header_menu)
             try:
                 # Apply modern style to menubutton if bootstrap available
@@ -2460,12 +2565,27 @@ class TranslatorGUI:
         self.cmb_ui_quick.pack(side="left")
         self.cmb_ui_quick.bind("<<ComboboxSelected>>", self._on_ui_lang_change)
 
-        # File queue + pickers (rounded card)
-        files_card = _RoundedCard(self.root_scroll.content, min_height=260)
-        files_card.pack(fill="both", expand=True, padx=12, pady=6)
+        # ---- Body: file queue + log on the left (flexible), translation panel on the right ----
+        body = ttk.Frame(self.root_scroll.content)
+        body.pack(fill="both", expand=True, padx=6)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=0, minsize=380)
+        body.rowconfigure(0, weight=1)
+        self.left_col = ttk.Frame(body)
+        self.left_col.grid(row=0, column=0, sticky="nsew")
+        self.right_col = ttk.Frame(body)
+        self.right_col.grid(row=0, column=1, sticky="nsew")
+        # Tooltips are re-translated on UI language change: attr -> English source text
+        self._tooltips: Dict[str, object] = {}
+        self._tooltip_keys: Dict[str, str] = {}
+
+        # File queue (rounded card)
+        files_card = _RoundedCard(self.left_col, min_height=300)
+        files_card.pack(fill="both", expand=True, padx=6, pady=6)
         self.lbl_files_header = self._build_section_header(files_card.content, self._tr("📁 Files"), ctx="info")
-        self.frm_files = ttk.LabelFrame(files_card.content, text=self._tr("Files"), style="Card.TLabelframe")
-        self.frm_files.pack(fill="both", expand=True)
+        # Plain frame: a LabelFrame here repeated the section title ("Files" twice)
+        self.frm_files = ttk.Frame(files_card.content)
+        self.frm_files.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         top_row = ttk.Frame(self.frm_files)
         top_row.pack(fill="x")
         self.btn_add = ttk.Button(top_row, text=self._tr("Add..."), command=self._add_files)
@@ -2475,11 +2595,56 @@ class TranslatorGUI:
         self.btn_clear = ttk.Button(top_row, text=self._tr("Clear"), command=self._clear_files)
         self.btn_clear.pack(side="left")
         if TkinterDnD and DND_FILES:
-            self.lbl_dnd = ttk.Label(top_row, text=self._tr("(Drag-and-drop supported)"))
-            self.lbl_dnd.pack(side="left", padx=10)
+            self.lbl_dnd = ttk.Label(self.frm_files, text=self._tr("(Drag-and-drop supported)"), foreground="#94a3b8")
+            self.lbl_dnd.pack(side="bottom", anchor="w", pady=(4, 0))  # below the list: keeps the button row short
         else:
-            self.lbl_dnd = ttk.Label(top_row, text=self._tr("(Install tkinterdnd2 for drag-and-drop)"))
-            self.lbl_dnd.pack(side="left", padx=10)
+            self.lbl_dnd = ttk.Label(self.frm_files, text=self._tr("(Install tkinterdnd2 for drag-and-drop)"), foreground="#94a3b8")
+            self.lbl_dnd.pack(side="bottom", anchor="w", pady=(4, 0))
+        # Secondary actions as compact icon buttons (their labels live in tooltips)
+        self.toolbar = ttk.Frame(top_row)
+        self.toolbar.pack(side="right")
+
+        def _icon_btn(attr: str, icon: str, tip: str, cmd) -> None:
+            b = ttk.Button(self.toolbar, text=icon, width=4, command=cmd)
+            b.pack(side="left", padx=1)
+            setattr(self, attr, b)
+            self._tooltip_keys[attr] = tip
+            self._tooltips[attr] = _Tooltip(b, self._tr(tip))
+
+        _icon_btn("tb_remove_missing", "🧹", "Remove missing", self._remove_missing)
+        _icon_btn("tb_preview", "👁", "Preview", self._preview_selected)
+        _icon_btn("tb_open_selected_out", "📄", "Open selected output", self._open_selected_output)
+        _icon_btn("tb_open_selected_outdir", "📂", "Open selected out folder", self._open_selected_output_folder)
+        _icon_btn("tb_reveal_src", "🗂", "Reveal in Explorer", self._reveal_in_explorer)
+        _icon_btn("tb_toggle_adv", "⚙", "Advanced settings...", self._open_advanced_dialog)
+        self._adv_visible = False
+        # Aliases kept for older code paths (tooltips/retranslation refer to these names)
+        self.tb_add = self.btn_add
+        self.tb_remove_selected = self.btn_remove
+        # Filter row with a real placeholder (old version filtered by the placeholder text itself)
+        filter_row = ttk.Frame(self.frm_files)
+        filter_row.pack(fill="x", pady=(6, 0))
+        self.filter_var = tk.StringVar()
+        self.ent_filter = ttk.Entry(filter_row, textvariable=self.filter_var)
+        self.ent_filter.pack(fill="x")
+        self._filter_placeholder_on = False
+
+        def _filter_placeholder(show: bool) -> None:
+            if show and not self.filter_var.get():
+                self._filter_placeholder_on = True
+                self.ent_filter.configure(foreground="#94a3b8")
+                self.filter_var.set("🔎 " + self._tr("Filter files..."))
+            elif not show and self._filter_placeholder_on:
+                self._filter_placeholder_on = False
+                self.ent_filter.configure(foreground="")
+                self.filter_var.set("")
+        self._filter_placeholder = _filter_placeholder
+        self.ent_filter.bind("<FocusIn>", lambda e: _filter_placeholder(False))
+        self.ent_filter.bind("<FocusOut>", lambda e: _filter_placeholder(True))
+        self.ent_filter.bind("<KeyRelease>", lambda e: self._apply_filter("" if self._filter_placeholder_on else self.filter_var.get().strip()))
+        _filter_placeholder(True)
+        self._tooltip_keys["ent_filter"] = "Type to filter by filename"
+        self._tooltips["ent_filter"] = _Tooltip(self.ent_filter, self._tr("Type to filter by filename"))
 
         cols = ("dosya", "boyut", "durum", "eklenme")
         self.tree = ttk.Treeview(self.frm_files, columns=cols, show="headings")
@@ -2513,64 +2678,8 @@ class TranslatorGUI:
         except Exception:
             pass
 
-        # Toolbar (quick actions) in rounded card
-        toolbar_card = _RoundedCard(self.root_scroll.content, min_height=60)
-        toolbar_card.pack(fill="x", padx=12, pady=6)
-        self.lbl_tools_header = self._build_section_header(toolbar_card.content, self._tr("🛠 Tools"), ctx="secondary")
-        self.toolbar = tk.Frame(toolbar_card.content, highlightthickness=0, bd=0)
-        self.toolbar.pack(fill="x", **pad)
-        # Quick filter
-        self.filter_var = tk.StringVar()
-        self.ent_filter = ttk.Entry(self.toolbar, textvariable=self.filter_var, width=28, style="Toolbar.TEntry")
-        self.ent_filter.pack(side="right")
-        self.ent_filter.insert(0, self._tr("Filter files..."))
-        def _on_filter_key(_e=None):
-            self._apply_filter(self.filter_var.get().strip())
-        self.ent_filter.bind("<KeyRelease>", _on_filter_key)
-        _Tooltip(self.ent_filter, self._tr("Type to filter by filename"))
-        self.tb_add = ttk.Button(self.toolbar, text=self._tr("📂 Add..."), command=self._add_files)
-        self.tb_add.pack(side="left")
-        self.tb_start = ttk.Button(self.toolbar, text=self._tr("▶ Start"), command=self._start, style="Primary.TButton")
-        self.tb_start.pack(side="left", padx=6)
-        self.tb_start_sel_text = tk.StringVar(value="▶ " + self._tr("Start selected"))
-        self.tb_start_sel = ttk.Button(self.toolbar, textvariable=self.tb_start_sel_text, command=self._start_selected)
-        self.tb_start_sel.pack(side="left")
-        self.tb_remove_missing = ttk.Button(self.toolbar, text="🧹 " + self._tr("Remove missing"), command=self._remove_missing)
-        self.tb_remove_missing.pack(side="left", padx=(6,0))
-        self.tb_remove_selected = ttk.Button(self.toolbar, text="🗑 " + self._tr("Remove selected"), command=self._remove_selected)
-        self.tb_remove_selected.pack(side="left")
-        self.tb_open_selected_out = ttk.Button(self.toolbar, text="📄 " + self._tr("Open selected output"), command=self._open_selected_output)
-        self.tb_open_selected_out.pack(side="left", padx=(6,0))
-        self.tb_open_selected_outdir = ttk.Button(self.toolbar, text="📂 " + self._tr("Open selected out folder"), command=self._open_selected_output_folder)
-        self.tb_open_selected_outdir.pack(side="left")
-        self.tb_reveal_src = ttk.Button(self.toolbar, text="🗂 " + self._tr("Reveal in Explorer"), command=self._reveal_in_explorer)
-        self.tb_reveal_src.pack(side="left", padx=(6,0))
-        self.tb_cancel = ttk.Button(self.toolbar, text=self._tr("⏹ Cancel"), command=self._cancel_run, state="disabled", style="Danger.TButton")
-        self.tb_cancel.pack(side="left")
-        self.tb_preview = ttk.Button(self.toolbar, text=self._tr("👁 Preview"), command=self._preview_selected)
-        self.tb_preview.pack(side="left", padx=6)
-        # Compact mode toggle
-        self.chk_compact = ttk.Checkbutton(self.toolbar, text=self._tr("Compact mode"), variable=self.compact_mode_var, command=lambda: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()), style="Toolbar.TCheckbutton")
-        self.chk_compact.pack(side="right", padx=(8, 0))
-        self._adv_visible = True
-        self.tb_toggle_adv = ttk.Button(self.toolbar, text=self._tr("Advanced settings..."), command=self._open_advanced_dialog)
-        self.tb_toggle_adv.pack(side="right")
-        # Tooltips
-        try:
-            _Tooltip(self.tb_add, "Dosya ekle (Ctrl+O)")
-            _Tooltip(self.tb_start, "Çeviriyi başlat (Ctrl+R)")
-            _Tooltip(self.tb_start_sel, "Seçili dosyaları çevir")
-            _Tooltip(self.tb_remove_missing, "Listede olup diskte bulunmayanları kaldır")
-            _Tooltip(self.tb_remove_selected, "Seçili dosyaları listeden kaldır")
-            _Tooltip(self.tb_open_selected_out, "Seçili dosyanın çıktı dosyasını aç")
-            _Tooltip(self.tb_open_selected_outdir, "Seçili dosyanın çıktı klasörünü aç")
-            _Tooltip(self.tb_reveal_src, "Seçili kaynak dosyayı sistem gezgininde göster")
-            _Tooltip(self.tb_cancel, "İptal (Esc)")
-            _Tooltip(self.tb_preview, "Önizleme")
-            _Tooltip(self.tb_toggle_adv, "Gelişmiş ayarlar")
-            _Tooltip(self.chk_compact, "Daha sıkı arayüz (küçük paddingle)")
-        except Exception:
-            pass
+        # Compact mode (reachable from the header menu; widget kept for retranslation/state)
+        self.chk_compact = ttk.Checkbutton(self.toolbar, text=self._tr("Compact mode"), variable=self.compact_mode_var, command=lambda: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
         # Menu bar
         try:
             self.menubar = tk.Menu(self.root)
@@ -2659,46 +2768,72 @@ class TranslatorGUI:
         except Exception:
             pass
 
-        # Language and engine strip
-        frm_lang = ttk.Frame(self.root)
-        frm_lang.pack(fill="x", **pad)
+        # ---- Right panel: translation settings + start/cancel ----
+        tr_card = _RoundedCard(self.right_col, min_height=230)
+        tr_card.pack(fill="x", padx=6, pady=6)
+        self.lbl_translate_header = self._build_section_header(tr_card.content, self._tr("🌍 Translation"), ctx="primary")
+        frm_lang = ttk.Frame(tr_card.content)
+        frm_lang.pack(fill="x", padx=12, pady=(0, 10))
         self.lbl_target = ttk.Label(frm_lang, text=self._tr("Target language:"))
         self.lbl_target.pack(anchor="w")
-        # Build localized target language names and bind
         try:
             self._rebuild_target_lang_names()
         except Exception:
             pass
-        self.cmb_lang = ttk.Combobox(frm_lang, values=(self.target_lang_names or self.lang_names), textvariable=self.target_lang_var, state="readonly")
-        self.cmb_lang.pack(fill="x")
-        self.cmb_lang.bind("<<ComboboxSelected>>", lambda e: self._maybe_update_output_suggestion())
-        eng_row = ttk.Frame(frm_lang)
-        eng_row.pack(fill="x", pady=6)
-        ttk.Label(eng_row, text=self._tr("Engine:")).pack(side="left")
-        for val, txt, tip in (("auto", "Auto", "Önceliğe göre Google/MyMemory"), ("google", "Google", "Google Translator"), ("mymemory", "MyMemory", "MyMemory Translator"), ("deepl", "DeepL", "DeepL Translator (API anahtarı)"), ("deepl_web", "DeepL (Web)", "DeepL web tarayıcı otomasyonu"), ("libre", "Libre", "LibreTranslate (self-hosted)")):
-            rb = ttk.Radiobutton(eng_row, text=self._tr(txt), value=val, variable=self.engine_var)
-            rb.pack(side="left", padx=(8, 0))
-            _Tooltip(rb, tip)
+        self.cmb_lang = ttk.Combobox(frm_lang, values=(self.target_lang_names or self.lang_names), textvariable=self.target_lang_var, state="readonly", height=20)
+        self.cmb_lang.pack(fill="x", pady=(2, 10))
+        self.cmb_lang.bind("<<ComboboxSelected>>", lambda e: (self._maybe_update_output_suggestion(), self._save_settings()))
+        self.lbl_engine_main = ttk.Label(frm_lang, text=self._tr("Engine:"))
+        self.lbl_engine_main.pack(anchor="w")
+        eng_grid = ttk.Frame(frm_lang)
+        eng_grid.pack(fill="x", pady=(2, 10))
+        self.engine_radios: Dict[str, object] = {}
+        engines = (
+            ("auto", "Auto", "Google first, MyMemory as fallback"),
+            ("google", "Google", "Google Translate (no key)"),
+            ("mymemory", "MyMemory", "MyMemory (no key, small daily quota)"),
+            ("deepl", "DeepL", "DeepL API (requires API key)"),
+            ("deepl_web", "DeepL (Web)", "DeepL website automation (experimental)"),
+            ("libre", "Libre", "LibreTranslate (self-hosted or API key)"),
+        )
+        for i, (val, txt, tip) in enumerate(engines):
+            rb = ttk.Radiobutton(eng_grid, text=self._tr(txt), value=val, variable=self.engine_var,
+                                 command=lambda: (self._refresh_status_bar(), self._save_settings()))
+            rb.grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 16), pady=1)
+            self.engine_radios[val] = rb
+            self._tooltip_keys[f"engine_{val}"] = tip
+            self._tooltips[f"engine_{val}"] = _Tooltip(rb, self._tr(tip))
+        run_row = ttk.Frame(frm_lang)
+        run_row.pack(fill="x")
+        self.tb_start = ttk.Button(run_row, text=self._tr("▶ Start"), command=self._start, style="Primary.TButton")
+        self.tb_start.pack(side="left", fill="x", expand=True)
+        self.tb_cancel = ttk.Button(run_row, text=self._tr("⏹ Cancel"), command=self._cancel_run, state="disabled", style="Danger.TButton")
+        self.tb_cancel.pack(side="left", padx=(6, 0))
+        self.tb_start_sel_text = tk.StringVar(value="▶ " + self._tr("Translate selected files"))
+        self.tb_start_sel = ttk.Button(frm_lang, textvariable=self.tb_start_sel_text, command=self._start_selected)
+        self.tb_start_sel.pack(fill="x", pady=(6, 0))
+        for attr, tip in (("tb_start", "Start translation (Ctrl+R)"), ("tb_cancel", "Cancel (Esc)"),
+                          ("tb_start_sel", "Translate only the selected files (Ctrl+Shift+R)"),
+                          ("btn_add", "Add files (Ctrl+O)"), ("btn_remove", "Remove selected files from the list")):
+            self._tooltip_keys[attr] = tip
+            self._tooltips[attr] = _Tooltip(getattr(self, attr), self._tr(tip))
 
-        # Progress in rounded card
-        prog_card = _RoundedCard(self.root_scroll.content, min_height=180)
-        prog_card.pack(fill="x", padx=12, pady=6)
+        # Progress (right panel)
+        prog_card = _RoundedCard(self.right_col, min_height=180)
+        prog_card.pack(fill="both", expand=True, padx=6, pady=6)
         self.lbl_progress_header = self._build_section_header(prog_card.content, self._tr("⌛ Progress"), ctx="primary")
         frm_prog = ttk.Frame(prog_card.content)
-        frm_prog.pack(fill="x", **pad)
-        # Circular progress + linear bar
-        self.circ = _CircularProgress(frm_prog, size=200, thickness=16)
-        self.circ.pack(side="left", padx=(0, 16))
+        frm_prog.pack(fill="x", padx=12, pady=(0, 10))
+        self.circ = _CircularProgress(frm_prog, size=150, thickness=14)
+        self.circ.pack(pady=(0, 8))
         try:
             self.circ.set(0, f"{self._tr('ETA')}: --:--")
         except Exception:
             pass
-        right_prog = ttk.Frame(frm_prog)
-        right_prog.pack(fill="both", expand=True)
-        self.pbar = ttk.Progressbar(right_prog, variable=self.progress_var, maximum=100)
+        self.pbar = ttk.Progressbar(frm_prog, variable=self.progress_var, maximum=100)
         self.pbar.pack(fill="x")
-        self.lbl_status = ttk.Label(right_prog, textvariable=self.status_var)
-        self.lbl_status.pack(anchor="w")
+        self.lbl_status = ttk.Label(frm_prog, textvariable=self.status_var, wraplength=340, justify="left")
+        self.lbl_status.pack(anchor="w", fill="x", pady=(6, 0))
 
         # Advanced container with scrollable area
         self.adv_container = ttk.Frame(self.root)
@@ -2724,9 +2859,9 @@ class TranslatorGUI:
                 delta = -1 if event.num == 4 else (1 if event.num == 5 else 0)
             if delta:
                 self.adv_canvas.yview_scroll(delta, "units")
-        self.adv_canvas.bind_all("<MouseWheel>", _adv_on_wheel)
-        self.adv_canvas.bind_all("<Button-4>", _adv_on_wheel)
-        self.adv_canvas.bind_all("<Button-5>", _adv_on_wheel)
+        # Bind only while hovered; a global bind_all here used to hijack the main page's wheel
+        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.adv_canvas.bind(_seq, _adv_on_wheel)
         # Resize advanced area proportionally as the window changes
         self._adv_height_ratio = 0.4  # 40% of window height
         def _on_root_resize(event):
@@ -2778,11 +2913,11 @@ class TranslatorGUI:
         ttk.Radiobutton(rowo4, text=self._tr("TXT"), value="txt", variable=self.pdf_mode_var).pack(side="left", padx=(8,0))
 
         # Log panel in rounded card
-        log_card = _RoundedCard(self.root_scroll.content, min_height=200)
-        log_card.pack(fill="both", expand=True, padx=12, pady=6)
+        log_card = _RoundedCard(self.left_col, min_height=170)
+        log_card.pack(fill="both", expand=False, padx=6, pady=6)
         self.lbl_log_header = self._build_section_header(log_card.content, self._tr("📝 Log"), ctx="secondary")
-        frm_log = ttk.LabelFrame(log_card.content, text=self._tr("Log"), style="Card.TLabelframe")
-        frm_log.pack(fill="both", expand=True, **pad)
+        frm_log = ttk.Frame(log_card.content)
+        frm_log.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         # Log level filters
         lvl = ttk.Frame(frm_log)
         lvl.pack(fill="x", pady=(0, 4))
@@ -2797,7 +2932,7 @@ class TranslatorGUI:
         self.btn_log_export = ttk.Button(lvl, text=self._tr("Export..."), command=self._export_logs)
         self.btn_log_export.pack(side="right", padx=(0,6))
         import tkinter.scrolledtext as scrolledtext
-        self.txt_log = scrolledtext.ScrolledText(frm_log, height=6, wrap="word")
+        self.txt_log = scrolledtext.ScrolledText(frm_log, height=5, wrap="word")
         self.txt_log.pack(fill="both", expand=True)
         try:
             self.txt_log.configure(relief="flat", borderwidth=0)
@@ -2810,7 +2945,7 @@ class TranslatorGUI:
 
         # Footer: Output controls + status bar in rounded card
         foot_card = _RoundedCard(self.root_scroll.content, min_height=80)
-        foot_card.pack(fill="x", padx=12, pady=6)
+        foot_card.pack(fill="x", padx=12, pady=(0, 8))
         self.lbl_output_header = self._build_section_header(foot_card.content, self._tr("📦 Output"), ctx="secondary")
         footer = ttk.Frame(foot_card.content)
         footer.pack(fill="x", **pad)
@@ -2818,7 +2953,7 @@ class TranslatorGUI:
         # Keep references with context for theme updates
         self.card_contexts = [
             (files_card, 'info'),
-            (toolbar_card, 'secondary'),
+            (tr_card, 'primary'),
             (prog_card, 'primary'),
             (log_card, 'secondary'),
             (foot_card, 'secondary'),
@@ -2835,10 +2970,11 @@ class TranslatorGUI:
         self.btn_browse_main.pack(side="left", padx=(6, 0))
         self.btn_open_out_main = ttk.Button(left_foot, text=self._tr("Open output folder"), command=self._open_outdir)
         self.btn_open_out_main.pack(side="left", padx=(6, 0))
-        right_foot = ttk.Frame(footer)
-        right_foot.pack(side="right")
-        self.status_bar = ttk.Label(right_foot, text=f"0 {self._tr('files')} | {self._tr('engine')}:auto | {self._tr('theme')}:dark")
-        self.status_bar.pack()
+        # Own row under the output controls, so it is never squeezed/clipped by them
+        right_foot = ttk.Frame(foot_card.content)
+        right_foot.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        self.status_bar = ttk.Label(right_foot, text="")
+        self.status_bar.pack(side="right")
 
         # Advanced settings (no longer shown inline)
         self.frm_adv = ttk.LabelFrame(self.adv_inner, text=self._tr("Advanced Settings"), style="Card.TLabelframe")
@@ -2904,11 +3040,6 @@ class TranslatorGUI:
         self._apply_bootstrap_styles()
         self._apply_font_scale()
         self._ensure_ui_font_family()
-        try:
-            self.tb_toggle_adv.configure(text=self._tr("Show advanced"))
-            # Do not pack inline advanced container; advanced opens in its own dialog
-        except Exception:
-            pass
         # Shortcuts
         self.root.bind_all("<Control-o>", lambda e: self._add_files())
         self.root.bind_all("<Control-O>", lambda e: self._add_files())
@@ -2922,12 +3053,9 @@ class TranslatorGUI:
         # Dict options moved to advanced dialog; keep variables
         self.dict_case_ins_var = tk.BooleanVar(value=False)
         self.dict_word_boundary_var = tk.BooleanVar(value=False)
-        # Sorting state and log storage
-        self._sort_reverse = {"dosya": False, "boyut": False, "durum": False}
-        self._log_entries = []  # list[tuple[level:str, message:str]]
-        self.log_info_var = tk.BooleanVar(value=True)
-        self.log_ok_var = tk.BooleanVar(value=True)
-        self.log_err_var = tk.BooleanVar(value=True)
+        # NOTE: log filter vars / _log_entries / _sort_reverse are created at the top of
+        # _build_ui. Re-creating them here (as before) detached the log filter checkboxes.
+        self._refresh_status_bar()
 
     def _flatten_borders_recursive(self, widget, bg_color: str | None = None) -> None:
         try:
@@ -3007,7 +3135,7 @@ class TranslatorGUI:
             # Tema değiştiğinde titlebar ve menü bar renklerini güncelle
             try:
                 bgc = self._bs.colors.bg if getattr(self, '_bs', None) is not None else self.root.cget('bg')
-                fgc = self._bs.colors.fg if getattr(self, '_bs', None) is not None else '#ffffff'
+                fgc = self._contrast_fg(self.root, bgc)
                 # Titlebar
                 if hasattr(self, 'titlebar'):
                     self.titlebar.configure(bg=bgc)
@@ -3053,19 +3181,16 @@ class TranslatorGUI:
     def _refresh_status_bar(self) -> None:
         try:
             cnt = len(self.files)
-            theme = self._tr("dark") if self.dark_mode_var.get() else self._tr("light")
+            # Uses the hand-checked keys ("light"/"theme" alone were mistranslated, e.g. ja "光")
+            theme = self._tr("Dark mode") if self.dark_mode_var.get() else self._tr("Light mode")
             eng = self.engine_var.get()
+            engine_lbl = self._tr("Engine:").rstrip(":： ")
+            self.status_bar.configure(text=f"{cnt} {self._tr('files')}  ·  {engine_lbl}: {eng}  ·  {theme}")
             try:
-                lbl_files = self._tr('files')
-                lbl_engine = self._tr('engine')
-                lbl_theme = self._tr('theme')
-            except Exception:
-                lbl_files, lbl_engine, lbl_theme = 'files', 'engine', 'theme'
-            self.status_bar.configure(text=f"{cnt} {lbl_files} | {lbl_engine}:{eng} | {lbl_theme}:{theme}")
-            try:
-                # Also keep ETA label localized
-                if hasattr(self, 'circ'):
-                    self.circ.set(self.circ.value if hasattr(self.circ, 'value') else 0, f"{self._tr('ETA')}: --:--")
+                # Keep the idle ETA label localized, but never reset a running progress ring
+                running = bool(getattr(self, '_thread', None)) and self._thread.is_alive()
+                if hasattr(self, 'circ') and not running:
+                    self.circ.set(0, f"{self._tr('ETA')}: --:--")
             except Exception:
                 pass
         except Exception:
@@ -3119,11 +3244,7 @@ class TranslatorGUI:
                 pass
         except Exception:
             pass
-        # Proactively build UI translation pack for selected language
-        try:
-            _prebuild_ui_packs([self.ui_lang_code])
-        except Exception:
-            pass
+        # (A synchronous Google request used to run here and could freeze the window.)
         self._retranslate_ui()
         # Persist selection
         try:
@@ -3132,36 +3253,12 @@ class TranslatorGUI:
             pass
 
     def _translate_texts(self, texts: List[str], target_code: str) -> Dict[str, str]:
-        # Only use JSON and built-in; no live translation to avoid blocking UI
-        if target_code == "en":
-            return {t: t for t in texts}
-        base_map: Dict[str, str] = {}
-        try:
-            if target_code in _BUILTIN_UI:
-                base_map.update(_BUILTIN_UI[target_code])
-        except Exception:
-            pass
-        try:
-            disk: Dict[str, Dict[str, str]] = {}
-            if os.path.exists(_UI_CACHE_FILE):
-                with open(_UI_CACHE_FILE, "r", encoding="utf-8") as rf:
-                    disk = json.load(rf) or {}
-            lang_only = target_code.split("-")[0]
-            disk_map = disk.get(target_code) or disk.get(lang_only)
-            if not disk_map:
-                for k, v in (disk or {}).items():
-                    if k.split("-")[0] == lang_only:
-                        disk_map = v
-                        break
-            if disk_map:
-                base_map.update(disk_map)
-        except Exception:
-            pass
-        return {t: base_map.get(t, t) for t in texts}
+        # JSON packs only (cached in memory); never blocks the UI on network
+        return {t: _ui_translate(t, target_code) for t in texts}
 
     def _retranslate_ui(self, initial: bool = False) -> None:
         keys = {
-            "title": "Subtitle Translator - GoogleTranslator",
+            "title": "Subtitle PRO – Multi Translator",
             "files": "Files",
             "size": "Size",
             "added": "Added",
@@ -3210,12 +3307,11 @@ class TranslatorGUI:
             return mapping.get(base, base)
         try:
             self.root.title(tr("title"))
-            self.frm_files.configure(text=tr("files"))
             # Header quick labels
             if hasattr(self, 'lbl_hdr_theme'):
                 self.lbl_hdr_theme.configure(text=self._tr("Theme:"))
             if hasattr(self, 'lbl_hdr_accent'):
-                self.lbl_hdr_accent.configure(text=self._tr("Accent:"))
+                self.lbl_hdr_accent.configure(text=self._tr("Accent color:"))
             if hasattr(self, 'lbl_hdr_ui'):
                 self.lbl_hdr_ui.configure(text=self._tr("UI language:"))
             if hasattr(self, 'lbl_files_header'):
@@ -3232,11 +3328,8 @@ class TranslatorGUI:
             self.btn_remove.configure(text=tr("remove"))
             self.btn_clear.configure(text=tr("clear"))
             # toolbar buttons
-            self.tb_add.configure(text=self._tr("📂 Add..."))
             self.tb_start.configure(text=tr("start"))
             self.tb_cancel.configure(text=tr("cancel"))
-            self.tb_preview.configure(text=self._tr("👁 Preview"))
-            self.tb_toggle_adv.configure(text=(self._tr("Hide advanced") if self._adv_visible else self._tr("Show advanced")))
             self.lbl_dnd.configure(text=tr("dnd_yes") if (TkinterDnD and DND_FILES) else tr("dnd_no"))
             self.tree.heading("dosya", text=tr("file"))
             if 'boyut' in self.tree["columns"]:
@@ -3287,33 +3380,15 @@ class TranslatorGUI:
                 except Exception: pass
             self.btn_preview.configure(text=self._tr("Preview"))
             # toolbar buttons refresh (language switch)
-            if hasattr(self, 'tb_add'):
-                try: self.tb_add.configure(text=self._tr("📂 Add..."))
-                except Exception: pass
             if hasattr(self, 'tb_start'):
                 try: self.tb_start.configure(text=self._tr("▶ Start"))
                 except Exception: pass
             if hasattr(self, 'tb_start_sel_text'):
                 try:
-                    self.tb_start_sel_text.set("▶ " + self._tr("Start selected"))
+                    self.tb_start_sel_text.set("▶ " + self._tr("Translate selected files"))
                 except Exception:
                     pass
             # tb_start_sel uses a StringVar; above we already set tb_start_sel_text
-            if hasattr(self, 'tb_remove_missing'):
-                try: self.tb_remove_missing.configure(text="🧹 " + self._tr("Remove missing"))
-                except Exception: pass
-            if hasattr(self, 'tb_remove_selected'):
-                try: self.tb_remove_selected.configure(text="🗑 " + self._tr("Remove selected"))
-                except Exception: pass
-            if hasattr(self, 'tb_open_selected_out'):
-                try: self.tb_open_selected_out.configure(text="📄 " + self._tr("Open selected output"))
-                except Exception: pass
-            if hasattr(self, 'tb_open_selected_outdir'):
-                try: self.tb_open_selected_outdir.configure(text="📂 " + self._tr("Open selected out folder"))
-                except Exception: pass
-            if hasattr(self, 'tb_reveal_src'):
-                try: self.tb_reveal_src.configure(text="🗂 " + self._tr("Reveal in Explorer"))
-                except Exception: pass
             if hasattr(self, 'tb_cancel'):
                 try: self.tb_cancel.configure(text=self._tr("⏹ Cancel"))
                 except Exception: pass
@@ -3434,18 +3509,25 @@ class TranslatorGUI:
             if hasattr(self, 'btn_open_out_main'):
                 try: self.btn_open_out_main.configure(text=self._tr("Open output folder"))
                 except Exception: pass
-            if initial:
+            self._retranslate_new_layout()
+            running = bool(getattr(self, '_thread', None)) and self._thread.is_alive()
+            if initial or not running:
                 self.status_var.set(tr("ready"))
         except Exception:
             pass
 
     def _tr(self, text: str) -> str:
-        return self._translate_texts([text], self.ui_lang_code).get(text, text)
+        return _ui_translate(text, getattr(self, "ui_lang_code", "en"))
 
-    def _fmt_progress_label(self, pct: float, remaining_sec: int, fi: int, file_total: int, name: str) -> str:
-        remaining = self._tr("Remaining")
+    def _fmt_progress_label(self, pct: float, remaining_sec: int, fi: int, file_total: int, name: str,
+                            words_done: int = 0, words_total: int = 0, elapsed_sec: int = 0) -> str:
         sec = self._tr("s")
-        return f"{fi}/{file_total} %{int(pct)} - {name} - {remaining}: {int(remaining_sec)} {sec}"
+        parts = [f"{fi}/{file_total}  {int(pct)}%  {name}"]
+        if words_total:
+            parts.append(f"{self._tr('Words')}: {words_done}/{words_total}")
+        parts.append(f"{self._tr('Elapsed')}: {int(elapsed_sec)} {sec}")
+        parts.append(f"{self._tr('Remaining')}: {int(remaining_sec)} {sec}")
+        return "  ·  ".join(parts)
 
     # ---------- Preview & language detect ----------
     def _on_preview_event(self, event=None) -> None:
@@ -3543,14 +3625,6 @@ class TranslatorGUI:
                 result = result.replace(src, dst)
         return result
 
-    def _tr(self, text: str) -> str:
-        return self._translate_texts([text], self.ui_lang_code).get(text, text)
-
-    def _fmt_progress_label(self, pct: float, remaining_sec: int, fi: int, file_total: int, name: str) -> str:
-        remaining = self._tr("remaining")
-        sec = self._tr("seconds_short")
-        return f"{fi}/{file_total} %{int(pct)} - {name} - {remaining}: {int(remaining_sec)} {sec}"
-
     def fix_window_focus(self):
         """Pencerenin focus kaybettiğinde kaybolmamasını sağlar."""
         try:
@@ -3586,7 +3660,7 @@ class TranslatorGUI:
         except Exception:
             pass
 
-    def _apply_theme(self) -> None:
+    def _apply_theme_impl(self) -> None:
         try:
             # If ttkbootstrap is available, prefer its theming and avoid overriding with manual styles
             if TBStyle is not None:
@@ -4016,7 +4090,7 @@ class TranslatorGUI:
         except Exception:
             pass
 
-    def _apply_bootstrap_styles(self) -> None:
+    def _apply_bootstrap_styles_impl(self) -> None:
         if TBStyle is None:
             return
         try:
@@ -4214,8 +4288,13 @@ class TranslatorGUI:
     def _build_section_header(self, parent, title: str, ctx: str = "secondary") -> ttk.Label:
         try:
             row = ttk.Frame(parent)
-            row.pack(fill="x", padx=4, pady=(2, 0))
-            lbl = ttk.Label(row, text=title)
+            row.pack(fill="x", padx=10, pady=(8, 6))
+            if not hasattr(self, "_section_font"):
+                base = tkfont.nametofont("TkDefaultFont").actual()
+                size = int(base.get("size", 9))
+                size = size + 1 if size > 0 else size - 1  # negative = pixels in Tk
+                self._section_font = tkfont.Font(family=base.get("family"), size=size, weight="bold")
+            lbl = ttk.Label(row, text=title, font=self._section_font)
             lbl.pack(side="left")
             # Style hint via context color using bootstrap cards mapping
             if TBStyle is not None:
@@ -4349,7 +4428,7 @@ class TranslatorGUI:
             c_comp.pack(side="left", padx=6)
             # Accent
             r2 = ttk.Frame(frm); r2.pack(fill="x", pady=6)
-            ttk.Label(r2, text=self._tr("Accent:")).pack(side="left")
+            ttk.Label(r2, text=self._tr("Accent color:")).pack(side="left")
             cb_acc = ttk.Combobox(r2, state="readonly", values=["blue","purple","green","orange","pink","teal"], textvariable=self.accent_var, width=12)
             try:
                 if TBStyle is not None:
@@ -4770,43 +4849,104 @@ class TranslatorGUI:
             msg = str(e) or e.__class__.__name__
             import errno as _errno
             if isinstance(e, FileNotFoundError):
-                return f"Dosya bulunamadı{': ' + path if path else ''}\n{msg}"
+                return f"{self._tr('File not found')}{': ' + path if path else ''}\n{msg}"
             if isinstance(e, PermissionError):
-                return f"İzin reddedildi{': ' + path if path else ''}\n{msg}"
+                return f"{self._tr('Permission denied')}{': ' + path if path else ''}\n{msg}"
             if isinstance(e, IsADirectoryError):
-                return f"Bir klasör dosya olarak açılmaya çalışıldı{': ' + path if path else ''}\n{msg}"
+                return f"{self._tr('A folder was opened as a file')}{': ' + path if path else ''}\n{msg}"
             if isinstance(e, UnicodeDecodeError):
-                return f"Kodlama hatası (UTF-8?)\n{msg}"
+                return f"{self._tr('Encoding error (UTF-8?)')}\n{msg}"
             if isinstance(e, OSError) and getattr(e, 'errno', None) == _errno.ENOSPC:
-                return f"Diskte yeterli alan yok\n{msg}"
+                return f"{self._tr('Not enough disk space')}\n{msg}"
             return f"{e.__class__.__name__}: {msg}"
         except Exception:
             return str(e) or "Bilinmeyen hata"
 
+    _LOG_MAX = 5000
+
+    # ---- Worker -> Tk thread hand-off. Workers never call Tk directly (Tkinter is not
+    # thread-safe); they post callables that the Tk thread runs from _drain_log_queue. ----
+    def _post(self, fn) -> None:
+        self._log_queue.put(fn)
+
+    def _call_on_ui(self, fn):
+        """Run fn on the Tk thread and wait for its result (used for the error dialog)."""
+        if threading.current_thread() is threading.main_thread():
+            return fn()
+        done = threading.Event()
+        box: Dict[str, object] = {}
+
+        def run():
+            try:
+                box["v"] = fn()
+            except Exception as e:  # pragma: no cover
+                box["e"] = e
+            finally:
+                done.set()
+        self._post(run)
+        done.wait()
+        if "e" in box:
+            raise box["e"]  # type: ignore[misc]
+        return box.get("v")
+
+    def _drain_log_queue(self) -> None:
+        try:
+            for _ in range(500):  # bounded per tick so the UI stays responsive
+                fn = self._log_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(50, self._drain_log_queue)
+        except Exception:
+            pass  # window destroyed
+
     def _log(self, message: str, level: str = "info") -> None:
+        """Thread-safe: worker threads hand the entry to the Tk thread; the view is appended
+        incrementally (it used to be fully redrawn on every call: 2,000 logs took 5.6 s)."""
+        if threading.current_thread() is not threading.main_thread():
+            # Never touch Tk from a worker: queue it; _drain_log_queue runs on the Tk thread.
+            self._post(lambda m=message, lv=level: self._log(m, lv))
+            return
         try:
             ts = time.strftime("%H:%M:%S")
-            self._log_entries.append((level, f"[{ts}] {message}"))
-            self._refresh_log_view()
+            entry = (level, f"[{ts}] {message}")
+            self._log_entries.append(entry)
+            if len(self._log_entries) > self._LOG_MAX:
+                del self._log_entries[: len(self._log_entries) - self._LOG_MAX]
+            if self._log_level_visible(level):
+                self._append_log_line(*entry)
         except Exception:
             pass
 
+    def _log_level_visible(self, level: str) -> bool:
+        flags = {"info": self.log_info_var, "ok": self.log_ok_var, "error": self.log_err_var}
+        var = flags.get(level)
+        return True if var is None else bool(var.get())
+
+    def _append_log_line(self, level: str, line: str) -> None:
+        tag = level if level in ("info", "ok", "error") else ()
+        self.txt_log.configure(state="normal")
+        self.txt_log.insert("end", line + "\n", tag)
+        # keep the widget bounded as well
+        excess = int(self.txt_log.index("end-1c").split(".")[0]) - 1000
+        if excess > 0:
+            self.txt_log.delete("1.0", f"{excess + 1}.0")
+        self.txt_log.configure(state="disabled")
+        self.txt_log.see("end")
+
     def _refresh_log_view(self) -> None:
+        """Full redraw — only needed when a level filter changes or the log is cleared."""
         try:
-            show_info = bool(self.log_info_var.get())
-            show_ok = bool(self.log_ok_var.get())
-            show_err = bool(self.log_err_var.get())
             self.txt_log.configure(state="normal")
             self.txt_log.delete("1.0", "end")
-            for lvl, line in self._log_entries[-1000:]:
-                if (lvl == "info" and not show_info) or (lvl == "ok" and not show_ok) or (lvl == "error" and not show_err):
-                    continue
-                tag = lvl if lvl in ("info","ok","error") else None
-                if tag:
-                    self.txt_log.insert("end", line + "\n", tag)
-                else:
-                    self.txt_log.insert("end", line + "\n")
-            self.txt_log.configure(state="normal")
+            visible = [e for e in self._log_entries if self._log_level_visible(e[0])][-1000:]
+            for lvl, line in visible:
+                self.txt_log.insert("end", line + "\n", lvl if lvl in ("info", "ok", "error") else ())
+            self.txt_log.configure(state="disabled")
             self.txt_log.see("end")
         except Exception:
             pass
@@ -4829,7 +4969,7 @@ class TranslatorGUI:
             self.root.clipboard_clear()
             self.root.clipboard_append(txt)
             try:
-                self._log("Log panoya kopyalandı", "ok")
+                self._log(self._tr("Log copied to clipboard"), "ok")
             except Exception:
                 pass
         except Exception:
@@ -4837,7 +4977,7 @@ class TranslatorGUI:
 
     def _add_files(self) -> None:
         paths = filedialog.askopenfilenames(
-            title="Dosya seç (SRT/VTT/TXT/MD/CSV/DOCX/PDF)",
+            title=self._tr("Select files (SRT/VTT/TXT/MD/CSV/DOCX/PDF)"),
             filetypes=(
                 ("Supported", "*.srt *.vtt *.txt *.md *.csv *.docx *.pdf"),
                 ("All files", "*.*"),
@@ -4963,6 +5103,7 @@ class TranslatorGUI:
     def _clear_files(self) -> None:
         self.files.clear()
         self.file_items.clear()
+        self.item_to_path.clear()
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         self._refresh_status_bar()
@@ -4993,10 +5134,10 @@ class TranslatorGUI:
     def _add_file(self, path: str) -> None:
         path = self._normalize_path(path)
         if not os.path.isfile(path):
-            self._log(f"Dosya bulunamadı: {path}", "error")
+            self._log(f"{self._tr('File not found')}: {path}", "error")
             return
         if not path.lower().endswith(SUPPORTED_EXTS):
-            self._log(f"Desteklenmeyen uzantı: {os.path.basename(path)}", "error")
+            self._log(f"{self._tr('Unsupported extension')}: {os.path.basename(path)}", "error")
             return
         if path in self.files:
             return
@@ -5021,9 +5162,9 @@ class TranslatorGUI:
                     pass
         except Exception:
             size_bytes = 0
-        self.tree.insert("", "end", iid=iid, values=(base_name, self._fmt_size(size_bytes), "Hazır", added_str))
+        self.tree.insert("", "end", iid=iid, values=(base_name, self._fmt_size(size_bytes), self._tr("Ready"), added_str))
         try:
-            self._log(f"Eklendi: {base_name} ({self._fmt_size(size_bytes)})", "ok")
+            self._log(f"{self._tr('File added')}: {base_name} ({self._fmt_size(size_bytes)})", "ok")
         except Exception:
             pass
         self._refresh_status_bar()
@@ -5160,6 +5301,36 @@ class TranslatorGUI:
 
         self._cancel = False
         self._start_ts = time.time()
+        # Snapshot every Tk variable here, on the main thread: the worker must not touch Tk.
+        try:
+            bs_snap = max(10, min(500, int(self.batch_size_var.get())))
+        except Exception:
+            bs_snap = 100
+        try:
+            mw_snap = max(1, min(16, int(self.mm_workers_var.get())))
+        except Exception:
+            mw_snap = 6
+        parallel_snap = bool(self.parallel_files_var.get())
+        try:
+            workers_snap = max(1, min(int(self.file_workers_var.get() or 1), 4)) if parallel_snap else 1
+        except Exception:
+            workers_snap = 1
+        cfg = {
+            "engine": self.engine_var.get().lower(),
+            "priority": self.auto_priority_var.get() if hasattr(self, 'auto_priority_var') else 'google_first',
+            "dict_mode": self.dict_mode_var.get(),
+            "skip_same": bool(self.skip_same_lang_var.get()),
+            "save_next": bool(self.save_next_var.get()),
+            "outdir": self.outdir_var.get().strip(),
+            "clean_after": bool(self.clean_after_var.get()),
+            "pdf_txt": (self.pdf_mode_var.get() == "txt") if hasattr(self, 'pdf_mode_var') else False,
+        }
+        tr_ = {k: self._tr(k) for k in ("Translating", "Completed", "Canceled", "Skipped", "Skipped (same language)",
+                                          "Error", "Translation failed", "Unsupported extension")}
+        try:
+            self._save_settings()
+        except Exception:
+            pass  # never block a translation because settings could not be written
         try:
             self.tb_start.configure(state="disabled")
         except Exception:
@@ -5168,7 +5339,7 @@ class TranslatorGUI:
             self.tb_cancel.configure(state="normal")
         except Exception:
             pass
-        self.status_var.set("Çeviri başlatıldı...")
+        self.status_var.set(self._tr("Translation started..."))
         self.progress_var.set(0)
 
         def _progress(done: int, total: int, file_idx: int = 0, file_total: int = 1, file_name: str = "") -> None:
@@ -5178,13 +5349,9 @@ class TranslatorGUI:
             remaining = ((total - done) / rate) if rate > 0 else 0
             def _update_ui() -> None:
                 self.progress_var.set(pct)
-                try:
-                    done_i = int(done)
-                    total_i = int(total)
-                    rem_i = max(0, total_i - done_i)
-                except Exception:
-                    done_i, total_i, rem_i = int(done), int(total), max(0, int(total) - int(done))
-                label = f"{file_idx}/{file_total} %{int(pct)} - {file_name} | kelime: {done_i}/{total_i} (kalan: {rem_i}) | geçen: {int(elapsed)} sn | kalan: {int(remaining)} sn"
+                done_i, total_i = int(done), int(total)
+                label =self._fmt_progress_label(pct, int(remaining), file_idx, file_total, file_name,
+                                                 words_done=done_i, words_total=total_i, elapsed_sec=int(elapsed))
                 self.status_var.set(label)
                 # Update circular progress
                 try:
@@ -5192,62 +5359,49 @@ class TranslatorGUI:
                     self.circ.set(int(pct), f"ETA: {m:02d}:{s:02d}")
                 except Exception:
                     pass
-            self.root.after(0, _update_ui)
+            self._post(_update_ui)
 
         def _cancel_check() -> bool:
             return self._cancel
 
         def _run() -> None:
             try:
-                # Clamp advanced settings
-                try:
-                    bs = int(self.batch_size_var.get())
-                except Exception:
-                    bs = 100
-                try:
-                    mw = int(self.mm_workers_var.get())
-                except Exception:
-                    mw = 6
-                bs = max(10, min(500, bs))
-                mw = max(1, min(16, mw))
+                bs, mw = bs_snap, mw_snap
                 total_files = len(targets)
-                parallel = bool(self.parallel_files_var.get())
-                workers = max(1, min(int(self.file_workers_var.get() or 1), 4)) if parallel else 1
+                parallel, workers = parallel_snap, workers_snap
                 if parallel and workers > 1:
-                    self.root.after(0, lambda: (self.pbar.configure(mode="indeterminate"), self.pbar.start(12)))
+                    self._post(lambda: (self.pbar.configure(mode="indeterminate"), self.pbar.start(12)))
                 else:
-                    self.root.after(0, lambda: (self.pbar.configure(mode="determinate"), self.pbar.stop()))
-                # Persist settings at start
-                self._save_settings()
+                    self._post(lambda: (self.pbar.configure(mode="determinate"), self.pbar.stop()))
                 self._log(f"Started translation | files={total_files} | lang={code} | batch={bs} | mm_jobs={mw} | parallel={parallel}", "info")
                 try:
-                    eng_sel = self.engine_var.get().lower()
+                    eng_sel = cfg["engine"]
                     if eng_sel == "deepl" and not (_DEEPL_API_KEY or ""):
-                        self._log("DeepL API anahtarı bulunamadı; MyMemory yedeğine düşülecek.", "info")
+                        self._log(self._tr("DeepL API key not found; falling back to MyMemory."), "info")
                     if eng_sel == "libre" and not (_LIBRE_URL or ""):
-                        self._log("LibreTranslate URL tanımlı değil; MyMemory yedeğine düşülecek.", "info")
+                        self._log(self._tr("LibreTranslate URL not set; falling back to MyMemory."), "info")
                 except Exception:
                     pass
 
-                def process_one(path: str, idx: int) -> None:
+                def process_one(path: str, idx: int, attempt: int = 0) -> None:
                     if self._cancel:
                         return
                     iid_local = self.file_items.get(path)
                     if iid_local:
-                        self.root.after(0, lambda i=iid_local: self._tree_set_safe(i, "durum", "Çeviriliyor"))
+                        self._post(lambda i=iid_local: self._tree_set_safe(i, "durum", tr_["Translating"]))
                     ext_local = os.path.splitext(path)[1].lower()
                     def _file_progress(done: int, total: int, p=path, fi=idx):
                         name = os.path.basename(p)
                         _progress(done, total, fi, total_files, name)
                         if iid_local:
-                            self.root.after(0, lambda i=iid_local, d=done, t=total: self._tree_set_safe(i, "durum", f"%{int(0 if t==0 else d*100/t)}"))
+                            self._post(lambda i=iid_local, d=done, t=total: self._tree_set_safe(i, "durum", f"%{int(0 if t==0 else d*100/t)}"))
                     try:
                         if ext_local in (".srt", ".vtt"):
                             lines_local = _read_lines_robust(path)
                             # Optional language detect (skip if source equals target)
                             try:
                                 do_skip = False
-                                if bool(getattr(self, 'skip_same_lang_var', True)):
+                                if cfg["skip_same"]:
                                     sample = "".join(lines_local[:60])
                                     src_guess = detect_language(sample)
                                     if src_guess and src_guess.lower().startswith(code.lower()[:2]):
@@ -5258,40 +5412,38 @@ class TranslatorGUI:
                                             do_skip = True
                                 if do_skip:
                                     if iid_local:
-                                        self.root.after(0, lambda i=iid_local: self._tree_set_safe(i, "durum", "Atlandı (aynı dil)"))
-                                    self._log(f"Atlandı (aynı dil): {os.path.basename(path)} [{src_guess}]", "info")
+                                        self._post(lambda i=iid_local: self._tree_set_safe(i, "durum", tr_["Skipped (same language)"]))
+                                    self._log(f"{tr_['Skipped (same language)']}: {os.path.basename(path)} [{src_guess}]", "info")
                                     return
                             except Exception:
                                 pass
                             # Apply custom dictionary (pre)
-                            if self.dict_mode_var.get() in ("pre", "both") and self.custom_terms:
+                            if cfg["dict_mode"] in ("pre", "both") and self.custom_terms:
                                 lines_local = [self._apply_terms(line, self.custom_terms) for line in lines_local]
-                            # Choose engine
-                            engine = self.engine_var.get().lower()
                             translated_local = translate_lines(
                                 lines_local,
                                 target_lang=code,
                                 batch_size=bs,
                                 mm_workers=mw,
-                                engine_mode=self.engine_var.get().lower(),
-                                auto_priority=self.auto_priority_var.get() if hasattr(self, 'auto_priority_var') else 'google_first',
+                                engine_mode=cfg["engine"],
+                                auto_priority=cfg["priority"],
                                 progress_callback=_file_progress,
                                 cancel_check=_cancel_check,
                                 wrap_limit=70,
                             )
                             # Apply custom dictionary (post)
-                            if self.dict_mode_var.get() in ("post", "both") and self.custom_terms:
+                            if cfg["dict_mode"] in ("post", "both") and self.custom_terms:
                                 translated_local = [self._apply_terms(line, self.custom_terms) for line in translated_local]
                             # Determine output path
-                            if self.save_next_var.get() or not self.outdir_var.get().strip():
+                            if cfg["save_next"] or not cfg["outdir"]:
                                 outp_local = _out_path_same_ext(path, code)
                             else:
                                 base = os.path.basename(path)
                                 stem, ext = os.path.splitext(base)
-                                outp_local = os.path.join(self.outdir_var.get().strip(), f"{stem}.{code}{ext}")
+                                outp_local = os.path.join(cfg["outdir"], f"{stem}.{code}{ext}")
                             with open(outp_local, "w", encoding="utf-8-sig", newline="") as wf:
                                 wf.writelines(translated_local)
-                            if self.clean_after_var.get() and srt_clean and outp_local.lower().endswith(".srt"):
+                            if cfg["clean_after"] and srt_clean and outp_local.lower().endswith(".srt"):
                                 try:
                                     srt_clean.process_file(outp_local)
                                 except Exception:
@@ -5300,7 +5452,7 @@ class TranslatorGUI:
                             # Language detect & skip
                             try:
                                 do_skip_t = False
-                                if bool(getattr(self, 'skip_same_lang_var', True)):
+                                if cfg["skip_same"]:
                                     _s = "".join(_read_lines_robust(path)[:60])
                                     sg = detect_language(_s)
                                     if sg and sg.lower().startswith(code.lower()[:2]):
@@ -5311,23 +5463,23 @@ class TranslatorGUI:
                                             do_skip_t = True
                                 if do_skip_t:
                                     if iid_local:
-                                        self.root.after(0, lambda i=iid_local: self._tree_set_safe(i, "durum", "Atlandı (aynı dil)"))
-                                    self._log(f"Atlandı (aynı dil): {os.path.basename(path)} [{sg}]", "info")
+                                        self._post(lambda i=iid_local: self._tree_set_safe(i, "durum", tr_["Skipped (same language)"]))
+                                    self._log(f"{tr_['Skipped (same language)']}: {os.path.basename(path)} [{sg}]", "info")
                                     return
                             except Exception:
                                 pass
-                            if self.save_next_var.get() or not self.outdir_var.get().strip():
-                                outp_tmp = translate_text_file(path, code, bs, mw, self.engine_var.get().lower(), self.auto_priority_var.get(), _file_progress, _cancel_check)
+                            if cfg["save_next"] or not cfg["outdir"]:
+                                outp_tmp = translate_text_file(path, code, bs, mw, cfg["engine"], cfg["priority"], _file_progress, _cancel_check)
                             else:
                                 # translate and move to outdir
-                                outp_tmp = translate_text_file(path, code, bs, mw, self.engine_var.get().lower(), self.auto_priority_var.get(), _file_progress, _cancel_check)
-                                dest = os.path.join(self.outdir_var.get().strip(), os.path.basename(outp_tmp))
+                                outp_tmp = translate_text_file(path, code, bs, mw, cfg["engine"], cfg["priority"], _file_progress, _cancel_check)
+                                dest = os.path.join(cfg["outdir"], os.path.basename(outp_tmp))
                                 try:
                                     os.replace(outp_tmp, dest)
                                 except Exception:
                                     shutil.copy2(outp_tmp, dest)
                             # Apply post terms for text-based outputs
-                            if self.dict_mode_var.get() in ("post", "both") and self.custom_terms:
+                            if cfg["dict_mode"] in ("post", "both") and self.custom_terms:
                                 try:
                                     with open(outp_tmp, "r", encoding="utf-8", newline="") as rf:
                                         content = rf.read()
@@ -5342,13 +5494,13 @@ class TranslatorGUI:
                                 target_lang=code,
                                 batch_size=bs,
                                 mm_workers=mw,
-                                engine_mode=self.engine_var.get().lower(),
-                                auto_priority=self.auto_priority_var.get() if hasattr(self, 'auto_priority_var') else 'google_first',
+                                engine_mode=cfg["engine"],
+                                auto_priority=cfg["priority"],
                                 progress_callback=_file_progress,
                                 cancel_check=_cancel_check,
                             )
-                            if not (self.save_next_var.get() or not self.outdir_var.get().strip()):
-                                dest = os.path.join(self.outdir_var.get().strip(), os.path.basename(outp_tmp))
+                            if not (cfg["save_next"] or not cfg["outdir"]):
+                                dest = os.path.join(cfg["outdir"], os.path.basename(outp_tmp))
                                 try:
                                     os.replace(outp_tmp, dest)
                                 except Exception:
@@ -5359,42 +5511,42 @@ class TranslatorGUI:
                                 target_lang=code,
                                 batch_size=bs,
                                 mm_workers=mw,
-                                engine_mode=self.engine_var.get().lower(),
-                                auto_priority=self.auto_priority_var.get() if hasattr(self, 'auto_priority_var') else 'google_first',
+                                engine_mode=cfg["engine"],
+                                auto_priority=cfg["priority"],
                                 progress_callback=_file_progress,
                                 cancel_check=_cancel_check,
-                                as_text=(self.pdf_mode_var.get()=="txt") if hasattr(self, 'pdf_mode_var') else False,
+                                as_text=cfg["pdf_txt"],
                             )
-                            if not (self.save_next_var.get() or not self.outdir_var.get().strip()):
-                                dest = os.path.join(self.outdir_var.get().strip(), os.path.basename(outp_tmp))
+                            if not (cfg["save_next"] or not cfg["outdir"]):
+                                dest = os.path.join(cfg["outdir"], os.path.basename(outp_tmp))
                                 try:
                                     os.replace(outp_tmp, dest)
                                 except Exception:
                                     shutil.copy2(outp_tmp, dest)
                         else:
-                            raise RuntimeError(f"Desteklenmeyen uzantı: {ext_local}")
+                            raise RuntimeError(f"{tr_['Unsupported extension']}: {ext_local}")
                         if iid_local:
-                            self.root.after(0, lambda i=iid_local: self._tree_set_safe(i, "durum", "Tamamlandı"))
+                            self._post(lambda i=iid_local: self._tree_set_safe(i, "durum", tr_["Completed"]))
                         self._log(f"Done: {os.path.basename(path)}", "ok")
                     except Exception as e:
                         pretty = self._format_exception(e, path)
-                        action = self._ask_error_action(os.path.basename(path), pretty)
+                        action = self._call_on_ui(lambda: self._ask_error_action(os.path.basename(path), pretty))
                         self._log(f"Error on {os.path.basename(path)}: {pretty} -> action={action}", "error")
-                        if action == "retry":
+                        if action == "retry" and attempt < 2:
                             try:
-                                process_one(path, idx)
+                                process_one(path, idx, attempt + 1)
                                 return
                             except Exception:
                                 pass
                         elif action == "skip":
                             if iid_local:
-                                self.root.after(0, lambda i=iid_local: self._tree_set_safe(i, "durum", "Atlandı"))
+                                self._post(lambda i=iid_local: self._tree_set_safe(i, "durum", tr_["Skipped"]))
                             return
                         else:
                             # cancel all
                             self._cancel = True
                         if iid_local:
-                            self.root.after(0, lambda i=iid_local, err=str(e): self._tree_set_safe(i, "durum", f"Hata: {err}"))
+                            self._post(lambda i=iid_local, err=str(e): self._tree_set_safe(i, "durum", f"{tr_['Error']}: {err}"))
 
                 if workers == 1:
                     for idx, path in enumerate(targets, start=1):
@@ -5406,14 +5558,15 @@ class TranslatorGUI:
                         fut_map = {pool.submit(process_one, p, i): (p, i) for i, p in enumerate(targets, start=1)}
                         for fut in _as_completed(fut_map):
                             completed += 1
-                            self.root.after(0, lambda c=completed: self.status_var.set(f"Tamamlandı: {c}/{total_files}"))
+                            self._post(lambda c=completed: self.status_var.set(f"{tr_['Completed']}: {c}/{total_files}"))
 
                 if parallel and workers > 1:
-                    self.root.after(0, lambda: self.pbar.stop())
-                self.root.after(0, lambda: (self.pbar.configure(mode="determinate"), self.status_var.set("Tamamlandı" if not self._cancel else "İptal edildi")))
+                    self._post(lambda: self.pbar.stop())
+                self._post(lambda: (self.pbar.configure(mode="determinate"), self.status_var.set(tr_["Completed"] if not self._cancel else tr_["Canceled"])))
                 self._log("All done" if not self._cancel else "Canceled by user", "info")
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("Hata", f"Çeviri başarısız:\n{e}"))
+                msg = f"{tr_['Translation failed']}:\n{e}"  # bound now: `e` is deleted after this block
+                self._post(lambda m=msg: messagebox.showerror(tr_["Error"], m))
             finally:
                 def _restore_buttons():
                     try:
@@ -5424,7 +5577,7 @@ class TranslatorGUI:
                         self.tb_cancel.configure(state="disabled")
                     except Exception:
                         pass
-                self.root.after(0, _restore_buttons)
+                self._post(_restore_buttons)
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -5439,7 +5592,7 @@ class TranslatorGUI:
         if not selected_paths:
             return self._start()
         try:
-            if not messagebox.askyesno("Confirm", f"Seçili {len(selected_paths)} dosya çevrilsin mi?"):
+            if not messagebox.askyesno(self._tr("Confirm"), f"{self._tr('Translate selected files?')} ({len(selected_paths)})"):
                 return
         except Exception:
             pass
@@ -5504,7 +5657,7 @@ class TranslatorGUI:
 
     def _cancel_run(self) -> None:
         self._cancel = True
-        self.status_var.set("İptal ediliyor...")
+        self.status_var.set(self._tr("Canceling..."))
 
     # Confirm close if work in progress
     def _on_close(self) -> None:
@@ -5517,7 +5670,7 @@ class TranslatorGUI:
                 busy = False
             if busy:
                 try:
-                    if not messagebox.askyesno("Onay", "Çeviri devam ediyor. Kapatmak istiyor musunuz?"):
+                    if not messagebox.askyesno(self._tr("Confirm"), self._tr("A translation is running. Close anyway?")):
                         return
                 except Exception:
                     pass
@@ -5532,149 +5685,293 @@ class TranslatorGUI:
         self.root.mainloop()
 
     # ---------- Settings (persist) ----------
-    def _load_settings(self) -> None:
+    # settings.json key -> (attribute holding a tk variable, type)
+    _SETTINGS_VARS = {
+        "dark": ("dark_mode_var", bool), "accent": ("accent_var", str), "compact": ("compact_mode_var", bool),
+        "bs_theme": ("bs_theme_var", str), "theme_profile": ("theme_profile_var", str), "font_scale": ("font_scale_var", float),
+        "batch": ("batch_size_var", int), "mm_workers": ("mm_workers_var", int), "parallel": ("parallel_files_var", bool),
+        "file_workers": ("file_workers_var", int), "save_next": ("save_next_var", bool), "out_dir": ("outdir_var", str),
+        "engine": ("engine_var", str), "auto_priority": ("auto_priority_var", str), "dict_mode": ("dict_mode_var", str),
+        "dict_path": ("dict_path_var", str), "dict_case_insensitive": ("dict_case_ins_var", bool),
+        "dict_word_boundary": ("dict_word_boundary_var", bool), "pdf_mode": ("pdf_mode_var", str),
+        "skip_same_lang": ("skip_same_lang_var", bool), "clean_after": ("clean_after_var", bool),
+    }
+
+    def _read_settings_file(self) -> Dict[str, object]:
         try:
             if os.path.exists(_SETTINGS_FILE):
                 with open(_SETTINGS_FILE, "r", encoding="utf-8") as rf:
                     cfg = json.load(rf)
-                self.dark_mode_var.set(bool(cfg.get("dark", False)))
-                self.accent_var.set(str(cfg.get("accent", "blue")))
-                self.compact_mode_var.set(bool(cfg.get("compact", False)))
-                self.bs_theme_var.set(str(cfg.get("bs_theme", "")))
-                self.theme_profile_var.set(str(cfg.get("theme_profile", "")))
-                try:
-                    self.font_scale_var.set(float(cfg.get("font_scale", 1.0)))
-                except Exception:
-                    self.font_scale_var.set(1.0)
-                ui_code = str(cfg.get("ui_lang_code", "en"))
-                # find name by code from JSON-defined UI langs first
-                name = next((n for n,c in self.ui_lang_map.items() if c == ui_code), None)
-                if not name:
-                    name = next((n for n,c in self.lang_map.items() if c == ui_code), None)
-                if name:
-                    self.ui_lang_var.set(name)
-                    self.ui_lang_code = ui_code
-                self.batch_size_var.set(int(cfg.get("batch", 100)))
-                self.mm_workers_var.set(int(cfg.get("mm_workers", 6)))
-                self.parallel_files_var.set(bool(cfg.get("parallel", False)))
-                self.file_workers_var.set(int(cfg.get("file_workers", 2)))
-                self.save_next_var.set(bool(cfg.get("save_next", True)))
-                self.outdir_var.set(str(cfg.get("out_dir", "")))
+                return cfg if isinstance(cfg, dict) else {}
         except Exception:
             pass
+        return {}
 
-    def _apply_settings_to_ui(self) -> None:
-        # Apply settings to UI controls that are not directly bound
-        try:
-            # Restore UI language from settings file if present
+    def _load_settings(self) -> None:
+        cfg = self._read_settings_file()
+        for key, (attr, typ) in self._SETTINGS_VARS.items():
+            var = getattr(self, attr, None)
+            if var is None or key not in cfg:
+                continue
             try:
-                if os.path.exists(_SETTINGS_FILE):
-                    with open(_SETTINGS_FILE, "r", encoding="utf-8") as rf:
-                        _cfg = json.load(rf) or {}
-                    ui_code = _cfg.get("ui_lang_code")
-                    if ui_code and (ui_code in self.ui_lang_map.values() or ui_code in self.lang_map.values()):
-                        # find name by code (prefer JSON UI languages)
-                        name = next((n for n,c in self.ui_lang_map.items() if c == ui_code), None)
-                        if not name:
-                            name = next((n for n,c in self.lang_map.items() if c == ui_code), None)
-                        if name:
-                            self.ui_lang_var.set(name)
-                            self.ui_lang_code = ui_code
-                            # immediately retranslate
-                            self._retranslate_ui()
-                            self._ensure_ui_font_family()
-                            try:
-                                import sys as _sys
-                                setattr(_sys.modules[__name__], "_CURRENT_UI_LANG_CODE", self.ui_lang_code)
-                            except Exception:
-                                pass
-                            # also rebuild target language names to reflect restored UI language
-                            try:
-                                # Rebuild base language map and names for target list using current UI language
-                                try:
-                                    self.lang_map = _get_supported_langs(self.ui_lang_code)
-                                    self.lang_names = sorted(self.lang_map.keys())
-                                except Exception:
-                                    pass
-                                self._rebuild_target_lang_names()
-                                if hasattr(self, 'cmb_lang'):
-                                    self.cmb_lang.configure(values=(self.target_lang_names or self.lang_names))
-                            except Exception:
-                                pass
+                var.set(typ(cfg[key]))
             except Exception:
                 pass
-            # Engine and priority
+        ui_code = str(cfg.get("ui_lang_code") or "")
+        if ui_code and (ui_code in self.ui_lang_map.values() or ui_code in getattr(self, "ui_codes", [])):
+            self.ui_lang_code = ui_code
+        self._saved_target_code = cfg.get("target_lang")
+
+    def _apply_loaded_settings(self) -> None:
+        """Re-apply settings that _build_ui already consumed with defaults."""
+        steps = [
+            lambda: self.theme_var.set("dark" if self.dark_mode_var.get() else "light"),
+            self._sync_header_combos,
+            self._apply_theme,
+            self._apply_font_scale,
+            lambda: self._rebuild_ui_lang_names(),
+            lambda: self.cmb_ui_quick.configure(values=self.ui_lang_names),
+            lambda: self._select_target_code(self._default_target_code(getattr(self, "_saved_target_code", None))),
+            lambda: self._load_custom_dict(self.dict_path_var.get()) if self.dict_path_var.get() else None,
+            self._retranslate_ui,
+            self._refresh_status_bar,
+        ]
+        for step in steps:
+            try:
+                step()
+            except Exception:
+                pass
+
+    def _apply_settings_to_ui(self) -> None:
+        # Kept for older call sites; settings are now applied by _apply_loaded_settings
+        try:
             if self.engine_var.get() not in ("auto", "google", "mymemory", "deepl", "deepl_web", "libre"):
                 self.engine_var.set("auto")
             if self.auto_priority_var.get() not in ("google_first", "mymemory_first"):
                 self.auto_priority_var.set("google_first")
-            # Dictionary mode default
             if self.dict_mode_var.get() not in ("off", "pre", "post", "both"):
                 self.dict_mode_var.set("off")
-            # Toggle button text to match current visibility
-            if hasattr(self, 'tb_toggle_adv'):
-                self.tb_toggle_adv.configure(text=self._tr("Show advanced") if not self._adv_visible else self._tr("Hide advanced"))
-            # Ensure UI language list is localized
-            try:
-                self._rebuild_ui_lang_names()
-                if hasattr(self, 'cmb_ui_quick'):
-                    self.cmb_ui_quick.configure(values=self.ui_lang_names)
-            except Exception:
-                pass
         except Exception:
             pass
 
     def _save_settings(self) -> None:
+        """Merge into the existing file so keys we don't manage (API keys etc.) survive."""
         try:
-            cfg = {
-                "dark": bool(self.dark_mode_var.get()),
-                "accent": str(self.accent_var.get()),
-                "compact": bool(self.compact_mode_var.get()),
-                "bs_theme": str(self.bs_theme_var.get()),
-                "theme_profile": str(self.theme_profile_var.get()),
-                "font_scale": float(self.font_scale_var.get()),
-                "ui_lang_code": str(self.ui_lang_code),
-                "batch": int(self.batch_size_var.get()),
-                "mm_workers": int(self.mm_workers_var.get()),
-                "parallel": bool(self.parallel_files_var.get()),
-                "file_workers": int(self.file_workers_var.get()),
-                "save_next": bool(self.save_next_var.get()),
-                "out_dir": str(self.outdir_var.get()),
-            }
-            with open(_SETTINGS_FILE, "w", encoding="utf-8") as wf:
+            cfg = self._read_settings_file()
+            for key, (attr, typ) in self._SETTINGS_VARS.items():
+                var = getattr(self, attr, None)
+                if var is not None:
+                    try:
+                        cfg[key] = typ(var.get())
+                    except Exception:
+                        pass
+            cfg["ui_lang_code"] = str(self.ui_lang_code)
+            code = self._current_target_code() if hasattr(self, "target_lang_var") else None
+            if code:
+                cfg["target_lang"] = code
+            tmp = _SETTINGS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as wf:
                 json.dump(cfg, wf, ensure_ascii=False, indent=2)
+            os.replace(tmp, _SETTINGS_FILE)
         except Exception:
             pass
 
     # ---- UI language list helpers ----
     def _rebuild_ui_lang_names(self) -> None:
+        """UI-language picker shows each language in its own script (autonym), e.g. 'Deutsch', '日本語'."""
         try:
-            names = []
             name_to_code: Dict[str, str] = {}
             for code in getattr(self, 'ui_codes', []) or []:
-                disp = _localize_lang_name(code, self.ui_lang_code)
-                label = disp
-                suffix = 2
-                while label in name_to_code and name_to_code[label] != code:
-                    label = f"{disp} ({suffix})"
-                    suffix += 1
+                label = UI_LANG_AUTONYMS.get(code) or _localize_lang_name(code, self.ui_lang_code)
+                if label in name_to_code and name_to_code[label] != code:
+                    label = f"{label} ({code})"
                 name_to_code[label] = code
-                names.append(label)
-            names = sorted(names, key=lambda s: s.casefold())
+            names = sorted(name_to_code, key=lambda s: s.casefold())
             self.ui_lang_map = {n: name_to_code[n] for n in names} or {"English": "en"}
             self.ui_lang_names = names or ["English"]
-            # keep current selection
-            try:
-                cur_code = self.ui_lang_code
-                if cur_code in self.ui_lang_map.values():
-                    cur_name = next((n for n,c in self.ui_lang_map.items() if c == cur_code), None)
-                    if cur_name:
-                        self.ui_lang_var.set(cur_name)
-            except Exception:
-                pass
+            cur_name = next((n for n, c in self.ui_lang_map.items() if c == self.ui_lang_code), None)
+            if cur_name:
+                self.ui_lang_var.set(cur_name)
         except Exception:
             self.ui_lang_map = {"English": "en"}
             self.ui_lang_names = ["English"]
+
+    def _rebuild_target_lang_names(self) -> None:
+        """Localized target-language names (keyed by display name) built from self.lang_map codes.
+        Keeps the current selection by language code."""
+        cur_code = self._current_target_code()
+        name_to_code: Dict[str, str] = {}
+        for code in sorted(set(self.lang_map.values())):
+            label = _localize_lang_name(code, self.ui_lang_code)
+            if label in name_to_code and name_to_code[label] != code:
+                label = f"{label} ({code})"
+            name_to_code[label] = code
+        names = sorted(name_to_code, key=lambda s: s.casefold())
+        self.target_lang_map = {n: name_to_code[n] for n in names}
+        self.target_lang_names = names
+        if cur_code:
+            self._select_target_code(cur_code)
+
+    def _current_target_code(self) -> Optional[str]:
+        name = self.target_lang_var.get() if hasattr(self, 'target_lang_var') else ""
+        return (getattr(self, 'target_lang_map', {}) or {}).get(name) or self.lang_map.get(name)
+
+    def _select_target_code(self, code: str) -> bool:
+        for mapping in (getattr(self, 'target_lang_map', {}) or {}, self.lang_map):
+            name = next((n for n, c in mapping.items() if c == code), None)
+            if name:
+                self.target_lang_var.set(name)
+                return True
+        return False
+
+    def _default_target_code(self, saved: Optional[str] = None) -> str:
+        """Saved choice -> UI language (if not English) -> Turkish -> English."""
+        codes = set(self.lang_map.values())
+        for c in (saved, self.ui_lang_code if self.ui_lang_code != "en" else None, "tr", "en"):
+            if c and c in codes:
+                return c
+        return next(iter(sorted(codes)), "en")
+
+    def _retranslate_new_layout(self) -> None:
+        """Texts introduced by the two-column layout; each step isolated so one failure
+        cannot leave the rest of the UI untranslated."""
+        steps = [
+            lambda: self.lbl_translate_header.configure(text=self._tr("🌍 Translation")),
+            lambda: self.lbl_app_subtitle.configure(text=self._tr("Batch subtitle & document translator")),
+            lambda: self.lbl_engine_main.configure(text=self._tr("Engine:")),
+            lambda: self.engine_radios["auto"].configure(text=self._tr("Auto")),
+            lambda: self.tb_start.configure(text=self._tr("▶ Start")),
+            lambda: self.tb_cancel.configure(text=self._tr("⏹ Cancel")),
+            lambda: self.btn_add.configure(text=self._tr("Add...")),
+            lambda: self.btn_remove.configure(text=self._tr("Remove")),
+            lambda: self._filter_placeholder(True) if self._filter_placeholder_on else None,
+        ]
+        if self._filter_placeholder_on:
+            steps.insert(0, lambda: self.filter_var.set("🔎 " + self._tr("Filter files...")))
+        for step in steps:
+            try:
+                step()
+            except Exception:
+                pass
+        self._sync_header_combos()
+        self._retranslate_queue_statuses()
+        for attr, key in getattr(self, '_tooltip_keys', {}).items():
+            try:
+                self._tooltips[attr].text = self._tr(key)
+            except Exception:
+                pass
+        for idx, key in getattr(self, '_header_menu_keys', []):
+            try:
+                self.header_menu.entryconfigure(idx, label=self._tr(key))
+            except Exception:
+                pass
+        self._refresh_status_bar()
+
+    ACCENTS = ("blue", "purple", "green", "orange", "pink", "teal")
+    _QUEUE_STATUS_KEYS = ("Ready", "Translating", "Completed", "Skipped", "Skipped (same language)", "Canceled")
+
+    def _retranslate_queue_statuses(self) -> None:
+        """Queue 'Status' cells were written in the UI language of the moment; re-map them."""
+        prev = getattr(self, "_queue_status_lang", "en")
+        new = self.ui_lang_code
+        if prev == new or not hasattr(self, "tree"):
+            self._queue_status_lang = new
+            return
+        back = {_ui_translate(k, prev): k for k in self._QUEUE_STATUS_KEYS}
+        err_prev, err_new = _ui_translate("Error", prev), _ui_translate("Error", new)
+        for iid in self.tree.get_children(""):
+            try:
+                val = self.tree.set(iid, "durum")
+                if val in back:
+                    self.tree.set(iid, "durum", _ui_translate(back[val], new))
+                elif val.startswith(err_prev + ":"):
+                    self.tree.set(iid, "durum", err_new + val[len(err_prev):])
+            except Exception:
+                pass
+        self._queue_status_lang = new
+
+    def _sync_header_combos(self) -> None:
+        """Translated labels for theme/accent pickers, selected from the internal keys."""
+        try:
+            self.cmb_theme.configure(values=[self._tr("Light mode"), self._tr("Dark mode")])
+            self.cmb_theme.current(1 if self.dark_mode_var.get() else 0)
+            self.cmb_accent.configure(values=[self._tr(a.capitalize()) for a in self.ACCENTS])
+            acc = self.accent_var.get()
+            self.cmb_accent.current(self.ACCENTS.index(acc) if acc in self.ACCENTS else 0)
+        except Exception:
+            pass
+
+    # ---- Theme wrappers: every theme change ends with consistent card/titlebar colours ----
+    def _apply_theme(self) -> None:
+        try:
+            self._apply_theme_impl()
+        finally:
+            self._apply_card_colors()
+
+    def _apply_bootstrap_styles(self) -> None:
+        try:
+            self._apply_bootstrap_styles_impl()
+        finally:
+            self._apply_card_colors()
+
+    @staticmethod
+    def _mix(widget, a: str, b: str, t: float) -> str:
+        try:
+            ra, ga, ba = (v / 257 for v in widget.winfo_rgb(a))
+            rb, gb, bb = (v / 257 for v in widget.winfo_rgb(b))
+            return "#%02x%02x%02x" % (int(ra + (rb - ra) * t), int(ga + (gb - ga) * t), int(ba + (bb - ba) * t))
+        except Exception:
+            return a
+
+    def _apply_card_colors(self) -> None:
+        """Flat panels: card fill = window background, thin outline. Inner widgets keep their
+        default styles, so nothing renders on a mismatched background (old 'patchy' look and
+        the black drop-shadows came from cards that never received theme colours)."""
+        try:
+            style = ttk.Style()
+            bg = style.lookup("TFrame", "background") or self.root.cget("bg")
+            fg = style.lookup("TLabel", "foreground") or self._contrast_fg(self.root, bg)
+            outline = self._mix(self.root, bg, fg, 0.16)
+            for card, _ctx in getattr(self, "card_contexts", []):
+                card.set_colors(fill=bg, shadow=outline)
+            style.configure("CardInner.TFrame", background=bg)
+            # Same background for every control that sits on a panel (radios used to show grey boxes)
+            for st in ("TRadiobutton", "TCheckbutton", "AppHeader.TFrame", "AppHeader.TLabel"):
+                style.configure(st, background=bg)
+            for st in ("TRadiobutton", "TCheckbutton"):
+                # explicit foreground too: in dark mode radios kept dark text on the dark panel
+                style.configure(st, foreground=fg)
+                style.map(st, background=[("active", bg), ("!active", bg)], foreground=[("disabled", outline), ("!disabled", fg)])
+            try:
+                self.root_scroll.canvas.configure(bg=bg)
+            except Exception:
+                pass
+            title_fg = self._contrast_fg(self.root, bg)
+            if hasattr(self, "titlebar"):
+                self.titlebar.configure(bg=bg)
+                for w in self.titlebar.winfo_children():
+                    if isinstance(w, tk.Label):
+                        w.configure(bg=bg, fg=title_fg)
+                    elif isinstance(w, tk.Frame):
+                        w.configure(bg=bg)
+                        for c in w.winfo_children():
+                            if isinstance(c, tk.Label):
+                                c.configure(bg=bg)
+            if hasattr(self, "_top_spacer"):
+                self._top_spacer.configure(bg=bg)
+            if hasattr(self, "circ"):
+                self.circ.set_color(style.lookup("TProgressbar", "background") or "#3b82f6")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _contrast_fg(widget, bg: str) -> str:
+        """Readable text colour for a background (fixes white-on-white title in light theme)."""
+        try:
+            r, g, b = (v / 65535 for v in widget.winfo_rgb(bg))
+            return "#1f2937" if (0.2126 * r + 0.7152 * g + 0.0722 * b) > 0.55 else "#f8fafc"
+        except Exception:
+            return "#1f2937"
 
 
 def launch_gui() -> None:
