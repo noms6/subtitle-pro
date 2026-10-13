@@ -48,7 +48,8 @@ tests/
 - [x] 37 dil paketi eşitlendi (çöp/kullanılmayan anahtarlar silindi, eksikler dolduruldu, 36 dil için elle kontrol edilmiş terimler)
 - [x] Emoji önekli arama, bellek içi önbellek, gömülü Türkçe metinler kaldırıldı, yerel dil adları, 133 hedef dil adı
 - [x] H4 worker↔Tk kuyruğu, H27, H38, H10/H11, H42, fare tekerleği, log filtreleri, ☰ menüsü
-- [ ] RTL yerleşim (H69), ikincil diyalogların denetimi (H70), anadili konuşanlarca çeviri incelemesi
+- [x] Tek seferde açılış (H71), tek tasarım sistemi (H72), birleşik Ayarlar penceresi, Önizleme/Hakkında (H70, H73–H75)
+- [ ] RTL yerleşim (H69), anadili konuşanlarca çeviri incelemesi
 
 ## Faz 1 — Doğruluk ve güvenlik (1–2 gün) · *ilk sürümden önce şart*
 - [ ] **H1** Başarısız satırı asla başarı sayma; motor zinciri; "Kısmi" durum; CLI çıkış kodu (H35)

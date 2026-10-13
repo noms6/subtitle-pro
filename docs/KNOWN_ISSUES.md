@@ -150,9 +150,17 @@ Gerçek GUI kurulup 37 arayüz dilinin her birine geçilerek tüm görünür wid
 | ✅ H67 | Kuyruk durumları dil değişince güncellenmiyor; durum çubuğu açık temada "theme:dark" yazıyordu | | `_retranslate_queue_statuses`, `test_status_bar_reflects_theme_and_language` |
 | ✅ H68 | Hedef dil listesi Türkçe dışındaki arayüzlerde İngilizce (veya çıplak kod: "af"); arayüz dili listesi yerel adlar yerine İngilizce | | `lang_names.json` (37 × 133 ad) + yerel adlar ("Deutsch", "日本語") |
 | H69 | Sağdan sola diller (Arapça, Farsça): metinler doğru çiziliyor ama yerleşim aynalanmıyor (Tk'nin RTL desteği yok) | açık | — |
-| H70 | İkincil diyaloglar (Gelişmiş, Tercihler, Önizleme, Hakkında) denetim aracının kapsamı dışında; birkaç İngilizce başlık kalmış olabilir | açık | — |
+| ✅ H70 | İkincil pencereler denetlenmemişti | — | `test_dialogs_are_translated[*]` (Ayarlar/Hakkında/Önizleme × tr/de/ja) |
+| ✅ H71 | **Açılışta iki farklı arayüz:** pencere kurulurken görünüyordu — önce tam ekran beyaz pencere + yerel menü şeridi (0–3,5 sn), sonra 1024×680'e küçülüp sol üste geçiyor, tema sonradan değişiyordu (`state("zoomed")` çerçevesiz pencerede çalışmıyor, `fix_window_focus` gizle/göster yapıyordu) | ekran kaydıyla doğrulandı | pencere gizli kurulur, çalışma alanı boyutunda **bir kez** gösterilir — `test_window_shown_once_and_sized` |
+| ✅ H72 | Görünüm iki sistemden geliyordu (ttkbootstrap temaları + ~550 satır elle renk yaması) → makineye/ayara göre farklı görünüm (ör. "pulse" teması turkuaz düğmeler) | | tek palet tabanlı tasarım sistemi (`_apply_design`), ttkbootstrap kaldırıldı |
+| ✅ H73 | Hakkında penceresindeki proje bağlantısı alakasız bir projeye (nicegui.io) gidiyordu; sürüm/başlık eskiydi | | GitHub deposu — `test_about_links_to_this_project` |
+| ✅ H74 | Önizleme UI thread'inde Google'a istek atıyordu (donma + kota) ve dosyayı katı UTF-8 okuyordu | | çevrimdışı langdetect + `_read_lines_robust` — `test_preview_is_offline` |
+| ✅ H75 | "Gelişmiş ayarlar" birkaç alan için tam ekran açılıyordu; değerler ham anahtar ("google_first", "pre", "blue"); ayarlar 3 pencereye dağınık, koyu tema 3 yerde | | tek **Ayarlar** penceresi (Görünüm/Çeviri/Çıktı/Sözlük), yerelleştirilmiş seçenekler |
+| ✅ H76 | Makine çevirisi anlam hataları (2. tur): "Open output folder" → es/fr/pt "açık durumdaki klasör", uk "açık kaynak klasörü"; "Google first" → sv "önce Google'la", hi "önce Google'da ara", sr "Гоогле" | | 36 dil için elle düzeltildi |
+| ✅ H77 | Uygulama adı iki kez (özel başlık çubuğu + başlık satırı); açık temada beyaz kutu içinde | | tek başlık çubuğu: logo, ad, tema/vurgu/dil, ☰, pencere düğmeleri |
+| ✅ H78 | Kapanışta `invalid command name ..._drain_log_queue` / `ThemeChanged` hataları (pencere yok edildikten sonra çalışan zamanlayıcılar) | | zamanlayıcı iptal ediliyor, bekleyen görevler boşaltılıyor |
 
-Ekran görüntüleri: `docs/images/screenshot-*.png` (açık/koyu × tr, en, de, ja, ar). Önceki hâl: `docs/images/issue-default-target-and-theme.png`.
+Ekran görüntüleri: `docs/images/screenshot-*.png`, `dialog-*.png`. Önceki hâl: `docs/images/issue-default-target-and-theme.png`.
 
 ## Depo hijyeni (GitHub öncesi)
 - Telifli film altyazıları (`Superhero Movie ... .srt`, `test_sub*.srt`) ve kişisel `settings.json` depoya **eklenmez** (`.gitignore`). Testler için özgün örnek: `tests/fixtures/sample.en.srt`.

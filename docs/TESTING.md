@@ -31,13 +31,14 @@ Linux'ta GUI testleri için sanal ekran: `xvfb-run -a python -m pytest`.
 | `test_engine.py` | Motor yönlendirme, 429, fallback, istek sayısı, thread yarışı, ilerleme, iptal | 28 |
 | `test_formats.py` | TXT, DOCX (gövde/tablo/üstbilgi/köprü), PDF (Türkçe glif, kelime bölme), CLI | 19 |
 | `test_gui.py` | Kurulum, uçtan uca çeviri, paralel dosya, çıktı klasörü, worker↔Tk thread ayrımı, iptal, ayarlar, tema, kuyruk, sözlük | 36 |
-| `test_ui_i18n.py` | 37 dil paketinin eksiksizliği/çevrilmişliği/alfabe doğruluğu, emoji önek araması, önbellek, canlı dil değişiminde tüm görünür metinler, kırpılma, kaydırma, log, tema, menü | 140 |
+| `test_ui_i18n.py` | 37 dil paketi, emoji önek araması, önbellek, canlı dil değişiminde tüm görünür metinler, **ikincil pencereler**, kırpılma, kaydırma, log, tema, menü, **tek seferde açılış** | 152 |
 | `test_network.py` | Canlı Google/MyMemory, birleşik istek kavram kanıtı, küçük dosya | 4 (varsayılan kapalı) |
 
 ## Son Sonuç (2026-10-13, Windows 10, Python 3.10.11)
 
 ```
-252 passed, 42 xfailed, 4 deselected in 13.5s      (ui-overhaul dalı)
+264 passed, 42 xfailed, 4 deselected in 17.7s      (ui-overhaul dalı, 2. tur)
+252 passed, 42 xfailed, 4 deselected in 13.5s      (ui-overhaul dalı, 1. tur)
 94 passed, 59 xfailed, 2 xpassed, 4 deselected     (ilk sürüm, main)
 ```
 - **42 xfailed** = belgelenmiş, henüz düzeltilmemiş hatalar (çoğu çeviri motoru: H1, H2, H3, H12…).

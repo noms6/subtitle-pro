@@ -34,7 +34,7 @@ Zaman damgaları, sıra numaraları ve satır yapısı korunur · Çoklu motor �
 | 🔁 **Motorlar** | Google, MyMemory, DeepL API, LibreTranslate; *Auto* modda öncelik seçimi ve yedek motor |
 | ⚡ **Toplu iş** | Çoklu dosya kuyruğu, isteğe bağlı paralel dosya işleme, satır tekilleştirme, ilerleme ve kalan süre |
 | 🧠 **Akıllı** | Kaynak dil zaten hedef dilse dosyayı atlar (langdetect); özel terim sözlüğü (JSON/CSV, çeviri öncesi/sonrası) |
-| 🖥️ **Arayüz** | İki sütunlu düzen (kuyruk + çeviri paneli), koyu/açık tema, vurgu renkleri, yazı ölçekleme, sürükle-bırak, dosya filtreleme/sıralama, renkli log |
+| 🖥️ **Arayüz** | Kendi tasarım sistemi (ek tema kütüphanesi gerekmez): tek başlık çubuğu, iki sütunlu düzen, açık/koyu tema × 6 vurgu rengi, motor seçim çipleri, sürükle-bırak alanı, tek pencerede toplanmış Ayarlar, renkli log |
 | 🌍 **37 arayüz dili** | Anında dil değişimi; dil listesi yerel adlarla (Deutsch, 日本語, العربية); 133 hedef dilin adı her arayüz dilinde yerelleştirilmiş |
 | ⌨️ **CLI** | `translate_srt.py girdi.srt cikti.srt tr` |
 
@@ -43,8 +43,10 @@ Zaman damgaları, sıra numaraları ve satır yapısı korunur · Çoklu motor �
 | Açık · Türkçe | Koyu · 日本語 |
 |---|---|
 | <img src="docs/images/screenshot-light-tr.png" width="420"> | <img src="docs/images/screenshot-dark-ja.png" width="420"> |
-| **Açık · Deutsch** | **Açık · العربية** |
-| <img src="docs/images/screenshot-light-de.png" width="420"> | <img src="docs/images/screenshot-light-ar.png" width="420"> |
+| **Boş kuyruk (sürükle-bırak alanı)** | **Açık · Deutsch** |
+| <img src="docs/images/screenshot-empty-dark-tr.png" width="420"> | <img src="docs/images/screenshot-light-de.png" width="420"> |
+| **Ayarlar** | **Hakkında** |
+| <img src="docs/images/dialog-settings-dark.png" width="420"> | <img src="docs/images/dialog-about.png" width="420"> |
 
 ## Kurulum
 
@@ -71,7 +73,6 @@ pip install -r requirements.txt tkinterdnd2 langdetect
 | Paket | Ne için | Zorunlu mu |
 |---|---|---|
 | `deep-translator` | Çeviri motorları | ✅ |
-| `ttkbootstrap` | Modern tema | önerilir |
 | `tkinterdnd2` | Sürükle-bırak | isteğe bağlı |
 | `langdetect` | Aynı dildeki dosyayı atlama | isteğe bağlı |
 | `python-docx`, `docx2txt` | DOCX | DOCX için |
@@ -115,7 +116,7 @@ translate_srt.py        Uygulama (GUI + CLI + çeviri motoru) — tek dosya, mod
 ui_translations.json    Arayüz dil paketleri (37 dil × 153 metin)
 lang_names.json         Hedef dil adları, her arayüz dilinde (37 × 133)
 requirements*.txt       Bağımlılıklar
-tests/                  294 çevrimdışı + 4 canlı test (pytest)
+tests/                  306 çevrimdışı + 4 canlı test (pytest)
 tools/benchmark.py      Çevrimdışı performans ölçümü
 tools/ui_audit.py       Tüm dillerde arayüzü gezip çevrilmemiş/kırpılan metinleri raporlar
 tools/i18n_sync.py      Dil paketlerini kaynakla eşitler (eksikleri doldurur, çöp anahtarları temizler)
@@ -132,11 +133,11 @@ docs/                   Bilinen sorunlar, test raporu, yol haritası, ekran gör
 
 Paket ağa çıkmaz (sahte motorlar), gerçek GUI'yi ve gerçek DOCX/PDF dosyalarını test eder.
 Bilinen her hata `xfail(strict=True)` ile kayıtlıdır; düzeltildiğinde CI uyarır.
-Son sonuç: **252 geçti · 42 belgelenmiş hata (xfail)** — ayrıntı: [docs/TESTING.md](docs/TESTING.md).
+Son sonuç: **264 geçti · 42 belgelenmiş hata (xfail)** — ayrıntı: [docs/TESTING.md](docs/TESTING.md).
 
 ## Durum
 
-Kapsamlı bir denetim yapıldı: **69 sorun** önem sırasına göre kataloglandı; arayüz ve dil tarafındaki **29'u düzeltildi**.
+Kapsamlı bir denetim yapıldı: **77 sorun** önem sırasına göre kataloglandı; arayüz, pencereler ve dil tarafındaki **38'i düzeltildi**.
 
 **Düzeltildi (arayüz turu):** dil paketlerinin %80'e varan çevrilmemiş kısmı, Japonca paketteki Korece metinler, worker thread'in
 Tkinter'a doğrudan erişmesi, çalışmayan fare tekerleği ve log filtreleri, görünmeyen menüler, 133 yerine 37 hedef dil,

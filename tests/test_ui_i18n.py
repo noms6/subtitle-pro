@@ -135,7 +135,7 @@ def gui(tmp_path_factory):
     mp.undo()
 
 
-BRANDS = {"Google", "MyMemory", "DeepL", "DeepL (Web)", "Libre", "Subtitle PRO – Multi Translator", "☰", "🌐"}
+BRANDS = {"Google", "MyMemory", "DeepL", "DeepL (Web)", "Libre", "Subtitle PRO", "Subtitle PRO – Multi Translator", "☰", "🌐", "—", "☐", "❐", "✕", "⇩"}
 
 
 @pytest.mark.parametrize("code", ["tr", "de", "ja", "ar", "ru", "zh-CN", "fr", "es"])
@@ -241,7 +241,7 @@ def test_header_menu_exposes_hidden_menubar_items(gui):
     ui_audit.switch(gui, "en")
     labels = [gui.header_menu.entrycget(i, "label") for i in range(gui.header_menu.index("end") + 1)
               if gui.header_menu.type(i) != "separator"]
-    for item in ("Font size", "Compact mode", "Preferences...", "About"):
+    for item in ("Settings...", "Font size", "Compact mode", "About"):
         assert item in labels
 
 
@@ -249,6 +249,93 @@ def test_theme_and_accent_pickers_localized(gui):
     ui_audit.switch(gui, "tr")
     assert gui.cmb_theme.cget("values")[1] == PACKS["tr"]["Dark mode"]
     assert PACKS["tr"]["Teal"] in gui.cmb_accent.cget("values")
+
+
+def _dialog_texts(gui, opener):
+    """Open a dialog, walk all its tabs and collect visible texts."""
+    before = set(gui.root.winfo_children())
+    opener()
+    gui.root.update()
+    wins = [w for w in gui.root.winfo_children() if w not in before and w.winfo_class() == "Toplevel"]
+    texts = set()
+    for win in wins:
+        notebooks = []
+        stack = [win]
+        while stack:
+            w = stack.pop()
+            stack.extend(w.winfo_children())
+            if w.winfo_class() == "TNotebook":
+                notebooks.append(w)
+        for nb in notebooks or [None]:
+            for i in range(len(nb.tabs()) if nb else 1):
+                if nb:
+                    nb.select(i)
+                    texts.add(nb.tab(i, "text"))
+                gui.root.update()
+                for _p, _k, t, _c in ui_audit.widget_texts(win):
+                    texts.add(t)
+        texts.add(win.title())
+        win.destroy()
+    return texts
+
+
+@pytest.mark.parametrize("code", ["tr", "de", "ja"])
+@pytest.mark.parametrize("which", ["settings", "about", "preview"])
+def test_dialogs_are_translated(gui, tmp_path, code, which):
+    """H70: the secondary windows (settings, about, preview) are fully localized."""
+    sample = os.path.join(ROOT, "tests", "fixtures", "sample.en.srt")
+    gui._clear_files()
+    gui._add_file(sample)
+    gui.tree.selection_set(gui.tree.get_children("")[0])
+    openers = {"settings": gui._open_settings, "about": gui._show_about, "preview": gui._preview_selected}
+    ui_audit.switch(gui, "en")
+    base = _dialog_texts(gui, openers[which])
+    ui_audit.switch(gui, code)
+    cur = _dialog_texts(gui, openers[which])
+    allowed = BRANDS | COGNATES | {"PDF", "TXT", "Subtitle PRO", "MIT"}
+    still = sorted(t for t in cur & base
+                   if any(c.isalpha() for c in t) and t not in allowed and "sample.en.srt" not in t
+                   and not t.startswith(("github.com", "Version", "•  Multi-format")) and len(t) > 2)
+    ui_audit.switch(gui, "en")
+    gui._clear_files()
+    assert not still, f"{which}/{code}: still English: {still}"
+
+
+def test_about_links_to_this_project(gui):
+    """The About dialog used to link to nicegui.io (an unrelated project)."""
+    assert gui.REPO_URL.endswith("/subtitle-pro")
+    src = open(os.path.join(ROOT, "translate_srt.py"), encoding="utf-8").read()
+    assert "nicegui" not in src
+
+
+def test_preview_is_offline(gui, monkeypatch):
+    """Preview used to call Google on the UI thread (freeze + rate limit)."""
+    def boom(*a, **k):
+        raise AssertionError("network used by preview")
+    monkeypatch.setattr(T, "GoogleTranslator", boom)
+    gui._clear_files()
+    gui._add_file(os.path.join(ROOT, "tests", "fixtures", "sample.en.srt"))
+    gui.tree.selection_set(gui.tree.get_children("")[0])
+    texts = _dialog_texts(gui, gui._preview_selected)
+    assert any("English" in t or "İngilizce" in t for t in texts)  # langdetect, offline
+    gui._clear_files()
+
+
+def test_window_shown_once_and_sized(tmp_path, monkeypatch):
+    """The window used to appear blank, then re-layout, shrink to 1024x680 and switch theme."""
+    monkeypatch.setattr(T, "_SETTINGS_FILE", str(tmp_path / "s.json"))
+    events = []
+    real_deiconify = tk.Tk.deiconify
+    monkeypatch.setattr(tk.Tk, "deiconify", lambda self: (events.append("show"), real_deiconify(self))[1])
+    app = T.TranslatorGUI()
+    try:
+        app.root.update()
+        assert events == ["show"]
+        x, y, w, h = app._work_area()
+        assert (app.root.winfo_width(), app.root.winfo_height()) == (w, h)
+        assert app.root.cget("menu") == ""          # no native menubar strip
+    finally:
+        app.root.destroy()
 
 
 def test_default_target_language(gui):

@@ -510,11 +510,8 @@ except Exception:
     TkinterDnD = None  # type: ignore
     DND_FILES = None  # type: ignore
 
-# Optional ttkbootstrap for modern theming
-try:
-    from ttkbootstrap import Style as TBStyle  # type: ignore
-except Exception:
-    TBStyle = None  # type: ignore
+# ttkbootstrap is intentionally not used: the app ships its own design system (_apply_design)
+TBStyle = None  # type: ignore
 
 # Optional format handlers
 try:
@@ -726,7 +723,14 @@ UI_EXTRA_KEYS: List[str] = [
     "Add...", "Output settings...", "Preferences...", "Compact mode", "Font size", "About", "Exit",
     "Translating", "Completed", "Canceled", "Skipped", "Skipped (same language)", "Error", "Translation failed",
     "Unsupported extension", "Light mode", "Dark mode", "Blue", "Purple", "Green", "Orange", "Pink", "Teal",
-    "Words", "Elapsed", "Remaining", "s",
+    "Words", "Elapsed", "Remaining", "s", "Theme:", "Accent color:", "UI language:", "Settings",
+    # Settings dialog (labels/options reach _tr through _labeled / _keyed_combo)
+    "Appearance", "Translation", "Output", "Dictionary", "Engine:", "Engine selection: auto/google/mymemory.",
+    "Auto priority:", "Auto priority decides which engine is tried first in auto mode.", "Google first", "MyMemory first",
+    "Batch size (Google batch):", "Batch: how many unique lines are sent to Google at once.",
+    "Fallback concurrent jobs (MyMemory):", "MyMemory concurrent jobs: number of lines translated in parallel (fallback).",
+    "Output directory:", "PDF output as:", "Custom dictionary:", "Dictionary mode: off/pre/post/both.",
+    "Off", "Before translation", "After translation", "Both", "File",
 ]
 
 
@@ -1946,7 +1950,7 @@ class _CircularProgress(ttk.Frame):
                 self.canvas.create_arc(x0, y0, x1, y1, start=90, extent=-min(359.9, percent * 3.6), style=tk.ARC,
                                        outline=self.color, width=self.thickness)
             self.canvas.create_text(self.size / 2, self.size / 2, text=f"{percent}%", fill=self.text_color,
-                                    font=("Segoe UI", max(12, self.size // 7), "bold"))
+                                    font=getattr(self, "_font", None) or ("Segoe UI", max(12, self.size // 7), "bold"))
         except Exception:
             pass
 
@@ -1965,6 +1969,15 @@ class _CircularProgress(ttk.Frame):
         self._sync_bg()
         self._draw(self._percent)
 
+    def set_palette(self, bg: str, track: str, color: str, text: str, font=None) -> None:
+        self.color, self.track, self.text_color = color, track, text
+        self._font = font
+        try:
+            self.canvas.configure(bg=bg)
+        except Exception:
+            pass
+        self._draw(self._percent)
+
 
 class _RoundedCard(ttk.Frame):
     # shadow_offset=0 draws a 1px outline instead of a drop shadow (flat panel look)
@@ -1972,6 +1985,8 @@ class _RoundedCard(ttk.Frame):
         super().__init__(parent)
         self.radius = radius
         self.margin = margin
+        # content sits inside the rounded corners, otherwise its square corners cover them
+        self.inset = margin + max(3, radius // 2)
         self.fill = fill
         self.shadow = shadow
         self.shadow_offset = shadow_offset
@@ -1990,7 +2005,7 @@ class _RoundedCard(ttk.Frame):
         # Content frame rendered with card background
         self.content = ttk.Frame(self, style="CardInner.TFrame")
         # place content inside canvas window to follow resizing
-        self._win_id = self.canvas.create_window((margin, margin), window=self.content, anchor="nw")
+        self._win_id = self.canvas.create_window((self.inset, self.inset), window=self.content, anchor="nw")
         self.canvas.bind("<Configure>", self._on_resize)
         self.content.bind("<Configure>", self._on_content_config)
         self._redraw()
@@ -2000,17 +2015,18 @@ class _RoundedCard(ttk.Frame):
             w = max(1, self.canvas.winfo_width())
             h = max(1, self.canvas.winfo_height())
             # update inner window width to fit card minus margins
-            self.canvas.itemconfigure(self._win_id, width=max(1, w - 2 * self.margin))
-            self.canvas.coords(self._win_id, self.margin, self.margin)
+            self.canvas.itemconfigure(self._win_id, width=max(1, w - 2 * self.inset))
+            self.canvas.coords(self._win_id, self.inset, self.inset)
             self._redraw()
         except Exception:
             pass
 
-    def set_colors(self, fill: str, shadow: str) -> None:
+    def set_colors(self, fill: str, shadow: str, outer: Optional[str] = None) -> None:
+        """fill = card surface, shadow = outline colour, outer = page colour behind the rounded corners."""
         self.fill = fill
         self.shadow = shadow
         try:
-            self.canvas.configure(bg=self.fill)
+            self.canvas.configure(bg=outer or self.fill)
         except Exception:
             pass
         self._redraw()
@@ -2018,7 +2034,7 @@ class _RoundedCard(ttk.Frame):
     def set_min_height(self, h: int) -> None:
         self.min_height = max(1, int(h))
         try:
-            ch = max(self.min_height, self.content.winfo_reqheight() + 2 * self.margin)
+            ch = max(self.min_height, self.content.winfo_reqheight() + 2 * self.inset)
             self.canvas.configure(height=ch)
         except Exception:
             pass
@@ -2066,7 +2082,7 @@ class _RoundedCard(ttk.Frame):
 
     def _on_content_config(self, _e=None) -> None:
         try:
-            needed = self.content.winfo_reqheight() + 2 * self.margin
+            needed = self.content.winfo_reqheight() + 2 * self.inset
             cur = self.canvas.winfo_height()
             target = max(self.min_height, needed)
             if abs(cur - target) > 1:
@@ -2106,14 +2122,20 @@ class _ScrollableFrame(ttk.Frame):
     def _on_content(self, _e=None):
         try:
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            ch = self.canvas.winfo_height()
+            if ch > 1:
+                self.canvas.itemconfigure(self._win_id, height=max(ch, self.content.winfo_reqheight()))
         except Exception:
             pass
 
     def _on_canvas(self, _e=None):
         try:
             cw = self.canvas.winfo_width()
+            ch = self.canvas.winfo_height()
             if cw > 0:
-                self.canvas.itemconfigure(self._win_id, width=cw)
+                # Fill the window when it is taller than the content (no dead band at the bottom);
+                # otherwise keep the natural height and scroll.
+                self.canvas.itemconfigure(self._win_id, width=cw, height=max(ch, self.content.winfo_reqheight()))
         except Exception:
             pass
 
@@ -2139,184 +2161,69 @@ class TranslatorGUI:
         if tk is None:
             print("Tkinter not available. Use CLI: py translate_srt.py <in.srt> <out.srt> [lang]", file=sys.stderr)
             sys.exit(2)
-        # Root with optional DnD
-        if TkinterDnD:
-            self.root = TkinterDnD.Tk()  # type: ignore
-        else:
-            self.root = tk.Tk()
-        self.root.overrideredirect(True)
-        self.root.after(10, self.fix_window_focus)
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.root.after(10, lambda: self.root.attributes("-topmost", False))
-        self.root.title("Subtitle PRO")
-        # Başlık çubuğunu koyu yapmayı dene (hemen, kök pencere oluşunca)
-        try:
-            _enable_win_dark_titlebar(self.root.winfo_id(), True)
-            try:
-                # Ek olarak doğrudan DWM çağrısı (bazı sistemlerde daha etkili)
-                import ctypes as _ct
-                hwnd = _ct.c_void_p(int(self.root.winfo_id()))
-                if hwnd.value:
-                    val = _ct.c_int(1)
-                    _ct.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, _ct.byref(val), _ct.sizeof(val))
-            except Exception:
-                pass
-        except Exception:
-            pass
-        # Uygulama simgesi
-        try:
-            app_dir = os.path.dirname(__file__)
-            png_icon_pref = os.path.join(app_dir, "app_icon.png")  # tercih edilen
-            png_icon = os.path.join(app_dir, "icon.png")           # geri dönüş
-            ico_icon = os.path.join(app_dir, "icon.ico")
-            try:
-                pick_png = png_icon_pref if os.path.exists(png_icon_pref) else png_icon
-                if os.path.exists(pick_png):
-                    self._app_icon = tk.PhotoImage(file=pick_png)
-                    self.root.iconphoto(True, self._app_icon)
-            except Exception:
-                pass
-            try:
-                if os.path.exists(ico_icon):
-                    self.root.iconbitmap(default=ico_icon)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        # Enable per-monitor DPI awareness on Windows for crisp UI
+        # Per-monitor DPI awareness must be set before the first window exists
         try:
             if sys.platform.startswith("win"):
                 ctypes.windll.shcore.SetProcessDpiAwareness(1)  # type: ignore[attr-defined]
         except Exception:
             pass
-        # Start in a comfortable size, allow free resize; open maximized when possible
-        self.root.geometry("1024x680")
-        self.root.resizable(True, True)
+        self.root = TkinterDnD.Tk() if TkinterDnD else tk.Tk()  # type: ignore[union-attr]
+        # Build everything while hidden and show the finished window once. (It used to appear
+        # immediately as a blank full-screen window with a native menubar, then re-layout,
+        # shrink to 1024x680 and switch theme a few seconds later.)
+        self.root.withdraw()
+        self.root.overrideredirect(True)
+        self.root.title("Subtitle PRO")
         try:
-            self.root.minsize(1024, 680)
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            icon_png = os.path.join(app_dir, "icon.png")
+            if os.path.exists(icon_png):
+                self._app_icon = tk.PhotoImage(file=icon_png)
+                self.root.iconphoto(True, self._app_icon)
+                self._logo_img = self._app_icon.subsample(max(1, self._app_icon.width() // 26))
+            ico = os.path.join(app_dir, "icon.ico")
+            if os.path.exists(ico):
+                self.root.iconbitmap(default=ico)
         except Exception:
-            pass
+            self._logo_img = None
+        self.root.minsize(980, 640)
+        self._bs = None  # ttkbootstrap is no longer used: one deterministic design system instead
+        self._style = ttk.Style(self.root)
         try:
-            self.root.state("zoomed")
-        except Exception:
-            # Fallback to near-fullscreen geometry
-            try:
-                sw = self.root.winfo_screenwidth(); sh = self.root.winfo_screenheight()
-                w = max(1024, int(sw * 0.92)); h = max(680, int(sh * 0.88))
-                x = (sw - w) // 2; y = (sh - h) // 2
-                self.root.geometry(f"{w}x{h}+{x}+{y}")
-            except Exception:
-                pass
-        # Preferred minimum size when showing advanced sections
-        self._show_min_w = 1024
-        self._show_min_h = 680
-        try:
-            style = ttk.Style()
-            style.theme_use("clam")
-            # Softer, modern spacing
-            style.configure("TButton", padding=(12, 8))
-            style.configure("Accent.TButton", padding=(14, 10))
-            style.configure("TProgressbar", thickness=14)
-            style.configure("TLabelframe", padding=8)
-            style.configure("Treeview", rowheight=32)
-            # Modern rounded buttons and inputs
-            style.configure("TButton", relief="flat")
-            style.map("TButton", relief=[("pressed", "flat"), ("active", "flat")])
-            # Inputs spacing & modern combobox feel
-            try:
-                style.configure("TEntry", padding=(10, 6))
-                style.configure("TCombobox", padding=(10, 6))
-                style.configure("TMenubutton", padding=(10, 6))
-            except Exception:
-                pass
-            # Treeview polish: larger heading paddings and nicer selection
-            try:
-                style.configure("Treeview.Heading", padding=(8, 6))
-                style.map("Treeview",
-                          background=[("selected", "#e6f0ff")],
-                          foreground=[("selected", "#0f172a")])
-            except Exception:
-                pass
-            # Scrollbar styling (vertical)
-            style.layout("Modern.Vertical.TScrollbar",
-                         [("Vertical.Scrollbar.trough",
-                           {"children": [("Vertical.Scrollbar.thumb", {"expand": True, "sticky": "nswe"})],
-                            "sticky": "ns"})])
-            style.configure("Modern.Vertical.TScrollbar", troughcolor="#e8ebf2", background="#c3c9d6", bordercolor="#e8ebf2", lightcolor="#c3c9d6", darkcolor="#c3c9d6")
-            style.map("Modern.Vertical.TScrollbar",
-                      background=[("active", "#9aa3b6"), ("pressed", "#818aa0")])
-            # Modern horizontal scrollbar
-            style.layout("Modern.Horizontal.TScrollbar",
-                         [("Horizontal.Scrollbar.trough",
-                           {"children": [("Horizontal.Scrollbar.thumb", {"expand": True, "sticky": "nswe"})],
-                            "sticky": "we"})])
-            style.configure("Modern.Horizontal.TScrollbar", troughcolor="#e8ebf2", background="#c3c9d6", bordercolor="#e8ebf2", lightcolor="#c3c9d6", darkcolor="#c3c9d6")
-            style.map("Modern.Horizontal.TScrollbar",
-                      background=[("active", "#9aa3b6"), ("pressed", "#818aa0")])
+            self._style.theme_use("clam")
         except Exception:
             pass
 
-        # ttkbootstrap - initialize early
-        self._bs = None
-        if TBStyle is not None:
-            try:
-                self._bs = TBStyle(theme=self._default_bs_theme(), master=self.root)  # type: ignore
-            except Exception:
-                self._bs = None
-
-        # Font scaling
-        self.font_scale_var = tk.DoubleVar(value=1.1)
+        # ---- state & tk variables (all created before settings are read) ----
+        self.font_scale_var = tk.DoubleVar(value=1.0)
         self._base_fonts = {}
         self._base_font_sizes = {}
         self._init_base_fonts()
-
-        # Initialize UI language defaults before building language maps
-        self.ui_lang_var = tk.StringVar(value=("English"))
+        self.ui_lang_var = tk.StringVar(value="English")
         self.ui_lang_code = "en"
         try:
-            import sys as _sys
-            setattr(_sys.modules[__name__], "_CURRENT_UI_LANG_CODE", self.ui_lang_code)
+            pre = self._read_settings_file()
+            if pre.get("ui_lang_code"):
+                self.ui_lang_code = str(pre["ui_lang_code"])
         except Exception:
             pass
-        # If settings has a saved UI language, apply it BEFORE building language maps
-        try:
-            if os.path.exists(_SETTINGS_FILE):
-                with open(_SETTINGS_FILE, "r", encoding="utf-8") as _rf_pre:
-                    _cfg_pre = json.load(_rf_pre) or {}
-                ui_code_pre = _cfg_pre.get("ui_lang_code")
-                if ui_code_pre:
-                    self.ui_lang_code = str(ui_code_pre)
-                    try:
-                        import sys as _sys
-                        setattr(_sys.modules[__name__], "_CURRENT_UI_LANG_CODE", self.ui_lang_code)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        # Build UI language list from ui_translations.json (localized later)
-        self.lang_map = _get_supported_langs(self.ui_lang_code)  # display name (localized) -> code, for target languages
-        # Start with codes from JSON; we'll localize names per current UI lang
-        _ui_map_raw = _get_ui_langs_from_json()  # name (initial) -> code
-        self.ui_codes = sorted(set(_ui_map_raw.values()))
-        self.ui_lang_map = {}  # localized name -> code (filled below)
-        self.ui_lang_names = []
+        setattr(sys.modules[__name__], "_CURRENT_UI_LANG_CODE", self.ui_lang_code)
+        self.lang_map = _get_supported_langs(self.ui_lang_code)
+        self.ui_codes = sorted(set(_get_ui_langs_from_json().values()))
+        self.ui_lang_map: Dict[str, str] = {}
+        self.ui_lang_names: List[str] = []
         self.lang_names = sorted(self.lang_map.keys())
-        # Localized target language display map will be built based on UI language
         self.target_lang_map: Dict[str, str] = {}
         self.target_lang_names: List[str] = []
-        self.target_lang_var = tk.StringVar(value="Turkish" if "Turkish" in self.lang_map else (self.lang_names[0] if self.lang_names else ""))
-        # UI language defaults already initialized above
+        self.target_lang_var = tk.StringVar(value="")
         self._ui_cache: Dict[str, Dict[str, str]] = {}
-
         self.input_path_var = tk.StringVar()
         self.output_path_var = tk.StringVar()
         self.progress_var = tk.DoubleVar(value=0.0)
-        self.status_var = tk.StringVar(value=self._tr("Ready"))
-
+        self.status_var = tk.StringVar(value="")
         self._thread: Optional[threading.Thread] = None
         self._cancel = False
-        self._auto_output = True  # auto-update output path suggestion
+        self._auto_output = True
         self._start_ts = 0.0
         self.batch_size_var = tk.IntVar(value=100)
         self.mm_workers_var = tk.IntVar(value=6)
@@ -2327,303 +2234,315 @@ class TranslatorGUI:
         self.compact_mode_var = tk.BooleanVar(value=False)
         self.bs_theme_var = tk.StringVar(value="")
         self.theme_profile_var = tk.StringVar(value="")
-        self._style = ttk.Style()
-        self.file_items: Dict[str, str] = {}  # path -> iid
-        self.item_to_path: Dict[str, str] = {}  # iid -> path
+        self.file_items: Dict[str, str] = {}
+        self.item_to_path: Dict[str, str] = {}
         self.file_added_ts: Dict[str, float] = {}
         self.files: List[str] = []
-        # Custom dictionary
-        self.dict_mode_var = tk.StringVar(value="off")  # off/pre/post/both
+        self.dict_mode_var = tk.StringVar(value="off")
         self.dict_path_var = tk.StringVar(value="")
+        self.dict_case_ins_var = tk.BooleanVar(value=False)
+        self.dict_word_boundary_var = tk.BooleanVar(value=False)
         self.custom_terms: Dict[str, str] = {}
-        # Engine selection
-        self.engine_var = tk.StringVar(value="auto")  # auto/google/mymemory
-
-        # Output related state used in both main UI and dialogs
+        self.engine_var = tk.StringVar(value="auto")
+        self.auto_priority_var = tk.StringVar(value="google_first")
         self.save_next_var = tk.BooleanVar(value=True)
         self.outdir_var = tk.StringVar(value="")
         self.clean_after_var = tk.BooleanVar(value=False)
-        self.pdf_mode_var = tk.StringVar(value="pdf")  # 'pdf' or 'txt'
-        # Skip files that already appear to be in target language
+        self.pdf_mode_var = tk.StringVar(value="pdf")
         self.skip_same_lang_var = tk.BooleanVar(value=True)
-
+        self.log_info_var = tk.BooleanVar(value=True)
+        self.log_ok_var = tk.BooleanVar(value=True)
+        self.log_err_var = tk.BooleanVar(value=True)
+        self._log_entries: List[Tuple[str, str]] = []
+        self._sort_reverse = {"dosya": False, "boyut": False, "durum": False, "eklenme": False}
         self._log_queue: "queue.Queue[Callable[[], object]]" = queue.Queue()
-        self._build_ui()
+
+        # Settings first, so the very first frame already has the right theme/language/size
         self._load_settings()
-        self.root.after(100, self._drain_log_queue)
-        # UI language packs ship with the app (ui_translations.json). They used to be
-        # re-translated through Google on every launch, which burned the rate limit;
-        # regenerate them explicitly with:  translate_srt.py --build-ui-json
+        self._build_titlebar()
+        self._build_ui()
+        self._apply_loaded_settings()
+        self._drain_after = self.root.after(50, self._drain_log_queue)
+        # stop the queue pump with the window (avoids "invalid command name ..._drain_log_queue")
+        self.root.bind("<Destroy>", lambda e: e.widget is self.root and self._stop_pump(), add="+")
+        self._show_window()
 
-        # --- Custom Fluent Titlebar ---
-        bg_color = self._bs.colors.bg if getattr(self, '_bs', None) is not None else self.root.cget('bg')
-        fg_color = self._contrast_fg(self.root, bg_color)
-        self.titlebar = tk.Frame(self.root, bg=bg_color, relief="flat", height=32)
-        self.titlebar.place(x=0, y=0, relwidth=1)
+    def _stop_pump(self) -> None:
+        try:
+            self.root.after_cancel(self._drain_after)
+        except Exception:
+            pass
 
-        # --- Sol taraf: başlık ---
+    # ---------- window chrome (custom title bar, maximize, drag, resize) ----------
+    def _work_area(self) -> Tuple[int, int, int, int]:
+        """Desktop area without the taskbar (x, y, w, h)."""
+        try:
+            if sys.platform.startswith("win"):
+                class RECT(ctypes.Structure):
+                    _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long), ("r", ctypes.c_long), ("b", ctypes.c_long)]
+                r = RECT()
+                ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0)  # SPI_GETWORKAREA
+                if r.r > r.l and r.b > r.t:
+                    return r.l, r.t, r.r - r.l, r.b - r.t
+        except Exception:
+            pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
-        title_label = tk.Label(self.titlebar, text="Subtitle PRO – Multi Translator",
-                               bg=bg_color, fg=fg_color,
-                               font=("Segoe UI", 10, "bold"))
-        title_label.pack(side="left", padx=10, pady=4)
+    def _set_maximized(self, value: bool) -> None:
+        x, y, w, h = self._work_area()
+        if value:
+            if not getattr(self, "_is_max", False):
+                try:
+                    self._normal_geometry = self.root.geometry()
+                except Exception:
+                    pass
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        else:
+            geo = getattr(self, "_normal_geometry", None)
+            if not geo or geo.startswith("1x1"):
+                nw, nh = min(1320, int(w * 0.85)), min(860, int(h * 0.88))
+                geo = f"{nw}x{nh}+{x + (w - nw) // 2}+{y + (h - nh) // 2}"
+            self.root.geometry(geo)
+        self._is_max = value
+        try:
+            self._win_btn_max.configure(text="❐" if value else "☐")
+        except Exception:
+            pass
 
+    def _toggle_maximize(self, _e=None) -> None:
+        self._set_maximized(not getattr(self, "_is_max", False))
 
-        # --- Sağ taraf: pencere kontrol butonları ---
-        btn_frame = tk.Frame(self.titlebar, bg=bg_color)
-        btn_frame.pack(side="right", padx=(0, 6), pady=0)
-
-        def close_app():
-            self._on_close()  # asks for confirmation while a translation is running
-
-        def minimize():
+    def _minimize(self) -> None:
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+        except Exception:
             try:
-                import ctypes
-                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-                SW_MINIMIZE = 6
-                ctypes.windll.user32.ShowWindow(hwnd, SW_MINIMIZE)
+                self.root.iconify()
             except Exception:
                 pass
 
-        def maximize_restore():
-            try:
-                import ctypes
+    def _show_window(self) -> None:
+        """Size, give the borderless window a taskbar button, then map it exactly once."""
+        cfg = self._read_settings_file()
+        x, y, w, h = self._work_area()
+        nw, nh = min(1320, int(w * 0.85)), min(860, int(h * 0.88))
+        self._normal_geometry = cfg.get("window_geometry") or f"{nw}x{nh}+{x + (w - nw) // 2}+{y + (h - nh) // 2}"
+        self._set_maximized(bool(cfg.get("window_maximized", True)))
+        self.root.update_idletasks()
+        try:
+            if sys.platform.startswith("win"):
                 hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-                SW_SHOWMAXIMIZED = 3
-                SW_SHOWNORMAL = 1
-                # Check if window is maximized using IsZoomed
-                if ctypes.windll.user32.IsZoomed(hwnd):
-                    # Restore to normal
-                    ctypes.windll.user32.ShowWindow(hwnd, SW_SHOWNORMAL)
-                else:
-                    # Maximize
-                    ctypes.windll.user32.ShowWindow(hwnd, SW_SHOWMAXIMIZED)
-            except Exception:
-                # Fallback: try toggling via geometry
-                try:
-                    if self.root.winfo_width() >= self.root.winfo_screenwidth() - 10:
-                        # Likely maximized, restore
-                        self.root.geometry("1024x680")
-                    else:
-                        # Maximize
-                        sw = self.root.winfo_screenwidth()
-                        sh = self.root.winfo_screenheight()
-                        self.root.geometry(f"{sw}x{sh}+0+0")
-                except Exception:
-                    pass
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+                style = (style & ~0x00000080) | 0x00040000  # -TOOLWINDOW +APPWINDOW
+                ctypes.windll.user32.SetWindowLongW(hwnd, -20, style)
+        except Exception:
+            pass
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
 
-        # --- Yeni buton stilleri ---
-        def make_btn(parent, text, command, fg, hover_bg, active_fg):
-            b = tk.Label(parent, text=text, bg=bg_color, fg=fg,
-                         width=5, height=1, font=("Segoe UI", 11, "bold"))
-            b.pack(side="left", padx=1)
-            b.bind("<Enter>", lambda e, btn=b: btn.config(bg=hover_bg, fg=active_fg))
-            b.bind("<Leave>", lambda e, btn=b: btn.config(bg=bg_color, fg=fg))
-            b.bind("<Button-1>", lambda e: command())
+    def fix_window_focus(self):  # kept for compatibility; _show_window does this once
+        pass
+
+    def enable_drag(self):
+        def start_move(event):
+            if getattr(self, "_is_max", False):
+                return
+            self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+
+        def on_motion(event):
+            d = getattr(self, "_drag", None)
+            if d:
+                self.root.geometry(f"+{event.x_root - d[0]}+{event.y_root - d[1]}")
+
+        def stop_move(_e):
+            self._drag = None
+        for w in [self.titlebar] + list(getattr(self, "_drag_widgets", [])):
+            w.bind("<ButtonPress-1>", start_move)
+            w.bind("<B1-Motion>", on_motion)
+            w.bind("<ButtonRelease-1>", stop_move)
+            w.bind("<Double-Button-1>", self._toggle_maximize)
+
+    def _build_titlebar(self) -> None:
+        """One bar: logo, app name, header controls, window buttons (was two stacked title rows)."""
+        self.titlebar = tk.Frame(self.root, height=58, bd=0, highlightthickness=0)
+        self.titlebar.pack(side="top", fill="x")
+        self.titlebar.pack_propagate(False)
+        self.titlebar_border = tk.Frame(self.root, height=1, bd=0)
+        self.titlebar_border.pack(side="top", fill="x")
+        left = tk.Frame(self.titlebar, bd=0)
+        left.pack(side="left", fill="y", padx=(14, 0))
+        self._tb_frames = [left]
+        self._drag_widgets = [left]
+        if getattr(self, "_logo_img", None) is not None:
+            logo = tk.Label(left, image=self._logo_img, bd=0)
+            logo.pack(side="left", padx=(0, 10))
+            self._drag_widgets.append(logo)
+        names = tk.Frame(left, bd=0)
+        names.pack(side="left", fill="y")
+        self._tb_frames.append(names)
+        self.lbl_app_title = tk.Label(names, text="Subtitle PRO", bd=0, anchor="w")
+        self.lbl_app_title.pack(anchor="w", pady=(9, 0))
+        self.lbl_app_subtitle = tk.Label(names, text=self._tr("Batch subtitle & document translator"), bd=0, anchor="w")
+        self.lbl_app_subtitle.pack(anchor="w")
+        self._drag_widgets += [names, self.lbl_app_title, self.lbl_app_subtitle]
+
+        # window buttons (Fluent-style): packed first so header controls sit to their left
+        btns = tk.Frame(self.titlebar, bd=0)
+        btns.pack(side="right", fill="y")
+        self._tb_frames.append(btns)
+        self._win_btns = []
+
+        def win_btn(text, cmd, danger=False):
+            b = tk.Label(btns, text=text, width=5, bd=0, cursor="hand2")
+            b.pack(side="left", fill="y")
+            b.bind("<Button-1>", lambda e: cmd())
+            b._danger = danger  # type: ignore[attr-defined]
+            b.bind("<Enter>", lambda e, w=b: self._win_btn_hover(w, True))
+            b.bind("<Leave>", lambda e, w=b: self._win_btn_hover(w, False))
+            self._win_btns.append(b)
             return b
+        win_btn("—", self._minimize)
+        self._win_btn_max = win_btn("☐", self._toggle_maximize)
+        win_btn("✕", self._on_close, danger=True)
 
-        # --- Renkli ve görünür hale getirme ---
-        make_btn(btn_frame, "–", minimize, fg="#69c0ff", hover_bg="#1f3b4d", active_fg="white")   # Minimize
-        make_btn(btn_frame, "□", maximize_restore, fg="#d9d9d9", hover_bg="#333333", active_fg="white")  # Maximize
-        make_btn(btn_frame, "✕", close_app, fg="#ff4d4f", hover_bg="#a8071a", active_fg="white")  # Close
+        self.header_right = ttk.Frame(self.titlebar, style="Title.TFrame")
+        self.header_right.pack(side="right", padx=(0, 16))
+        self.enable_drag()
 
-        # --- Titlebar'ı sürükleme ---
-        self.root.after(10, self.enable_drag)
-
-        # Settings are loaded after _build_ui, so re-apply everything that depends on them
-        # (previously a saved dark theme / font size / target language was ignored on start).
-        self._apply_loaded_settings()
+    def _win_btn_hover(self, w, inside: bool) -> None:
+        p = getattr(self, "_palette", None) or {}
+        if inside:
+            w.configure(bg="#e81123" if getattr(w, "_danger", False) else p.get("hover", "#e5e7eb"),
+                        fg="#ffffff" if getattr(w, "_danger", False) else p.get("text", "#111827"))
+        else:
+            w.configure(bg=p.get("surface", "#ffffff"), fg=p.get("muted", "#6b7280"))
 
     def _build_ui(self) -> None:
-        pad = {"padx": 10, "pady": 6}
-        # Ensure log/sort vars exist before any UI uses them
-        try:
-            if not hasattr(self, 'log_info_var'):
-                self.log_info_var = tk.BooleanVar(value=True)
-            if not hasattr(self, 'log_ok_var'):
-                self.log_ok_var = tk.BooleanVar(value=True)
-            if not hasattr(self, 'log_err_var'):
-                self.log_err_var = tk.BooleanVar(value=True)
-            if not hasattr(self, '_log_entries'):
-                self._log_entries = []
-            if not hasattr(self, '_sort_reverse'):
-                self._sort_reverse = {"dosya": False, "boyut": False, "durum": False, "eklenme": False}
-        except Exception:
-            pass
-
-        # Spacer to avoid custom titlebar overlap
-        try:
-            if not hasattr(self, '_top_spacer'):
-                bgc = self._bs.colors.bg if getattr(self, '_bs', None) is not None else self.root.cget('bg')
-                self._top_spacer = tk.Frame(self.root, height=32, bg=bgc)
-                self._top_spacer.pack(side="top", fill="x")
-        except Exception:
-            pass
-
-        # Title bar (modern header) inside scrollable root
+        # Scrollable page (only scrolls when the window is smaller than the content)
         self.root_scroll = _ScrollableFrame(self.root)
         self.root_scroll.pack(fill="both", expand=True)
-        try:
-            # Remove any default borders/highlights that appear as white lines
-            if hasattr(self.root_scroll, 'canvas'):
-                self.root_scroll.canvas.configure(borderwidth=0, highlightthickness=0)
-            if hasattr(self.root_scroll, 'content'):
-                self.root_scroll.content.configure(borderwidth=0, relief="flat")
-        except Exception:
-            pass
-        titlebar = ttk.Frame(self.root_scroll.content, style="AppHeader.TFrame")
-        try:
-            titlebar.configure(borderwidth=0, relief="flat")
-        except Exception:
-            pass
-        titlebar.pack(fill="x", padx=10, pady=(10, 6))
-        left_hdr = ttk.Frame(titlebar)
-        left_hdr.pack(side="left")
-        ttk.Label(left_hdr, text="🌐", font=("Segoe UI Emoji", 16), style="AppHeader.TLabel").pack(side="left", padx=(0, 8))
-        ttl = ttk.Frame(left_hdr, style="AppHeader.TFrame")
-        ttl.pack(side="left")
-        ttk.Label(ttl, text=self._tr("Subtitle PRO – Multi Translator"), font=("Segoe UI", 14, "bold"), style="AppHeader.TLabel").pack(anchor="w")
-        self.lbl_app_subtitle = ttk.Label(ttl, text=self._tr("Batch subtitle & document translator"), style="AppHeader.TLabel")
-        self.lbl_app_subtitle.pack(anchor="w")
-        # subtle separator line under header (ttk with themed style)
-        # (separator not packed: it rendered as a stray line across the top of the header)
-        self.sep_hdr = ttk.Separator(titlebar, orient="horizontal", style="AppSeparator.TSeparator")
-        right_hdr = ttk.Frame(titlebar)
-        right_hdr.pack(side="right")
-        # Theme switch
-        self.lbl_hdr_theme = ttk.Label(right_hdr, text=self._tr("Theme:"))
+        self.root_scroll.content.configure(style="App.TFrame")
+        self.root_scroll.canvas.configure(borderwidth=0, highlightthickness=0)
+        page = self.root_scroll.content
+
+        # ---- header controls (live in the title bar) ----
+        hr = self.header_right
+        self._tooltips = {}
+        self._tooltip_keys = {}
+        # Icons + tooltips instead of text labels: long translations pushed the menu off-screen
+        self.lbl_hdr_theme = ttk.Label(hr, text="◐", style="Title.TLabel")
         self.lbl_hdr_theme.pack(side="left", padx=(0, 6))
-        # theme_var / accent_var hold internal keys; the comboboxes show translated labels
         self.theme_var = tk.StringVar(value=("dark" if self.dark_mode_var.get() else "light"))
-        self.cmb_theme = ttk.Combobox(right_hdr, state="readonly", width=9)
-        self.cmb_theme.pack(side="left", padx=(0, 12))
+        self.cmb_theme = ttk.Combobox(hr, state="readonly", width=8)
+        self.cmb_theme.pack(side="left", padx=(0, 14))
 
         def _on_theme_pick(_e=None):
             dark = self.cmb_theme.current() == 1
             self.theme_var.set("dark" if dark else "light")
             self.dark_mode_var.set(dark)
             self._apply_theme()
-            self._refresh_menu_bar()
             self._refresh_status_bar()
             self._save_settings()
         self.cmb_theme.bind("<<ComboboxSelected>>", _on_theme_pick)
-        # Accent selector
-        self.lbl_hdr_accent = ttk.Label(right_hdr, text=self._tr("Accent color:"))
+        self.lbl_hdr_accent = ttk.Label(hr, text="🎨", style="Title.TLabel")
         self.lbl_hdr_accent.pack(side="left", padx=(0, 6))
-        self.cmb_accent = ttk.Combobox(right_hdr, state="readonly", width=10)
-        self.cmb_accent.pack(side="left", padx=(0, 12))
+        self.cmb_accent = ttk.Combobox(hr, state="readonly", width=10)
+        self.cmb_accent.pack(side="left", padx=(0, 14))
 
         def _on_accent_pick(_e=None):
             idx = self.cmb_accent.current()
             if 0 <= idx < len(self.ACCENTS):
                 self.accent_var.set(self.ACCENTS[idx])
             self._apply_theme()
-            self._refresh_menu_bar()
             self._save_settings()
         self.cmb_accent.bind("<<ComboboxSelected>>", _on_accent_pick)
-        self._sync_header_combos()
-        # Header menu (About / Settings)
-        try:
-            self.header_menu_btn = ttk.Menubutton(right_hdr, text="☰", width=3)
-            self.header_menu_btn.pack(side="left", padx=(0, 12))
-            self.header_menu = tk.Menu(self.header_menu_btn, tearoff=False)
-            # The native menubar is invisible because the window uses overrideredirect, so
-            # everything users need must also be reachable from this header menu.
-            self.header_menu.add_command(label=self._tr("Add..."), command=self._add_files)
-            self.header_menu.add_separator()
-            self.header_menu.add_command(label=self._tr("Output settings..."), command=self._open_output_dialog)
-            self.header_menu.add_command(label=self._tr("Advanced settings..."), command=self._open_advanced_dialog)
-            self.header_menu.add_command(label=self._tr("Preferences..."), command=self._open_preferences)
-            self.header_menu.add_separator()
-            self.header_menu.add_checkbutton(label=self._tr("Compact mode"), onvalue=True, offvalue=False, variable=self.compact_mode_var,
-                                             command=lambda: (self._apply_theme(), self._save_settings()))
-            self.header_font_menu = tk.Menu(self.header_menu, tearoff=False)
-            for scale in (0.9, 1.0, 1.1, 1.2, 1.3):
-                self.header_font_menu.add_radiobutton(label=f"{int(scale*100)}%", value=scale, variable=self.font_scale_var,
-                                                      command=lambda: (self._apply_font_scale(), self._save_settings()))
-            self.header_menu.add_cascade(label=self._tr("Font size"), menu=self.header_font_menu)
-            self.header_menu.add_separator()
-            self.header_menu.add_command(label=self._tr("About"), command=self._show_about)
-            self.header_menu.add_command(label=self._tr("Exit"), command=self._on_close)
-            self._header_menu_keys = [(0, "Add..."), (2, "Output settings..."), (3, "Advanced settings..."),
-                                      (4, "Preferences..."), (6, "Compact mode"), (7, "Font size"), (9, "About"), (10, "Exit")]
-            self.header_menu_btn.configure(menu=self.header_menu)
-            try:
-                # Apply modern style to menubutton if bootstrap available
-                if TBStyle is not None:
-                    self.header_menu_btn.configure(style='secondary.TMenubutton')
-            except Exception:
-                pass
-        except Exception:
-            pass
-        # UI language quick selector
-        self.lbl_hdr_ui = ttk.Label(right_hdr, text=self._tr("UI language:"))
+        self.lbl_hdr_ui = ttk.Label(hr, text="🌐", style="Title.TLabel")
         self.lbl_hdr_ui.pack(side="left", padx=(0, 6))
-        # Localize UI language names for current UI language
         self._rebuild_ui_lang_names()
-        self.cmb_ui_quick = ttk.Combobox(right_hdr, state="readonly", values=self.ui_lang_names, textvariable=self.ui_lang_var, width=18)
-        self.cmb_ui_quick.pack(side="left")
+        self.cmb_ui_quick = ttk.Combobox(hr, state="readonly", values=self.ui_lang_names, textvariable=self.ui_lang_var, width=16, height=20)
+        self.cmb_ui_quick.pack(side="left", padx=(0, 10))
         self.cmb_ui_quick.bind("<<ComboboxSelected>>", self._on_ui_lang_change)
+        self.header_menu_btn = ttk.Menubutton(hr, text="☰", width=2, style="Icon.TMenubutton")
+        self.header_menu_btn.pack(side="left")
+        self.header_menu = tk.Menu(self.header_menu_btn, tearoff=False)
+        # The native menubar never showed (borderless window); everything lives here.
+        self.header_menu.add_command(label=self._tr("Add..."), command=self._add_files)
+        self.header_menu.add_command(label=self._tr("Settings..."), command=self._open_settings)
+        self.header_menu.add_separator()
+        self.header_menu.add_checkbutton(label=self._tr("Compact mode"), onvalue=True, offvalue=False, variable=self.compact_mode_var,
+                                         command=lambda: (self._apply_theme(), self._save_settings()))
+        self.header_font_menu = tk.Menu(self.header_menu, tearoff=False)
+        for scale in (0.9, 1.0, 1.1, 1.2, 1.3):
+            self.header_font_menu.add_radiobutton(label=f"{int(scale * 100)}%", value=scale, variable=self.font_scale_var,
+                                                  command=lambda: (self._apply_font_scale(), self._save_settings()))
+        self.header_menu.add_cascade(label=self._tr("Font size"), menu=self.header_font_menu)
+        self.header_menu.add_separator()
+        self.header_menu.add_command(label=self._tr("About"), command=self._show_about)
+        self.header_menu.add_command(label=self._tr("Exit"), command=self._on_close)
+        self._header_menu_keys = [(0, "Add..."), (1, "Settings..."), (3, "Compact mode"), (4, "Font size"),
+                                  (6, "About"), (7, "Exit")]
+        self.header_menu_btn.configure(menu=self.header_menu)
+        self._sync_header_combos()
+        for attr, w, key in (("hdr_theme", self.cmb_theme, "Theme:"), ("hdr_theme_i", self.lbl_hdr_theme, "Theme:"),
+                             ("hdr_accent", self.cmb_accent, "Accent color:"), ("hdr_accent_i", self.lbl_hdr_accent, "Accent color:"),
+                             ("hdr_ui", self.cmb_ui_quick, "UI language:"), ("hdr_ui_i", self.lbl_hdr_ui, "UI language:"),
+                             ("hdr_menu", self.header_menu_btn, "Settings")):
+            self._tooltip_keys[attr] = key
+            self._tooltips[attr] = _Tooltip(w, self._tr(key).rstrip(":： "))
 
-        # ---- Body: file queue + log on the left (flexible), translation panel on the right ----
-        body = ttk.Frame(self.root_scroll.content)
-        body.pack(fill="both", expand=True, padx=6)
+        # ---- body: queue + log (left, flexible) | translation + progress (right, fixed) ----
+        body = ttk.Frame(page, style="App.TFrame")
+        body.pack(fill="both", expand=True, padx=10, pady=(10, 0))
         body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=0, minsize=380)
+        body.columnconfigure(1, weight=0, minsize=360)
         body.rowconfigure(0, weight=1)
-        self.left_col = ttk.Frame(body)
+        self.left_col = ttk.Frame(body, style="App.TFrame")
         self.left_col.grid(row=0, column=0, sticky="nsew")
-        self.right_col = ttk.Frame(body)
+        self.right_col = ttk.Frame(body, style="App.TFrame")
         self.right_col.grid(row=0, column=1, sticky="nsew")
-        # Tooltips are re-translated on UI language change: attr -> English source text
-        self._tooltips: Dict[str, object] = {}
-        self._tooltip_keys: Dict[str, str] = {}
+        def tip(attr: str, widget, text: str) -> None:
+            self._tooltip_keys[attr] = text
+            self._tooltips[attr] = _Tooltip(widget, self._tr(text))
 
-        # File queue (rounded card)
-        files_card = _RoundedCard(self.left_col, min_height=300)
-        files_card.pack(fill="both", expand=True, padx=6, pady=6)
-        self.lbl_files_header = self._build_section_header(files_card.content, self._tr("📁 Files"), ctx="info")
-        # Plain frame: a LabelFrame here repeated the section title ("Files" twice)
+        # Files card
+        files_card = _RoundedCard(self.left_col, min_height=320)
+        files_card.pack(fill="both", expand=True, padx=4, pady=4)
+        self.lbl_files_header = self._build_section_header(files_card.content, self._tr("📁 Files"))
         self.frm_files = ttk.Frame(files_card.content)
-        self.frm_files.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.frm_files.pack(fill="both", expand=True, padx=14, pady=(0, 12))
         top_row = ttk.Frame(self.frm_files)
         top_row.pack(fill="x")
-        self.btn_add = ttk.Button(top_row, text=self._tr("Add..."), command=self._add_files)
+        self.btn_add = ttk.Button(top_row, text=self._tr("Add..."), command=self._add_files, style="Accent.TButton")
         self.btn_add.pack(side="left")
         self.btn_remove = ttk.Button(top_row, text=self._tr("Remove"), command=self._remove_selected)
         self.btn_remove.pack(side="left", padx=6)
         self.btn_clear = ttk.Button(top_row, text=self._tr("Clear"), command=self._clear_files)
         self.btn_clear.pack(side="left")
-        if TkinterDnD and DND_FILES:
-            self.lbl_dnd = ttk.Label(self.frm_files, text=self._tr("(Drag-and-drop supported)"), foreground="#94a3b8")
-            self.lbl_dnd.pack(side="bottom", anchor="w", pady=(4, 0))  # below the list: keeps the button row short
-        else:
-            self.lbl_dnd = ttk.Label(self.frm_files, text=self._tr("(Install tkinterdnd2 for drag-and-drop)"), foreground="#94a3b8")
-            self.lbl_dnd.pack(side="bottom", anchor="w", pady=(4, 0))
-        # Secondary actions as compact icon buttons (their labels live in tooltips)
-        self.toolbar = ttk.Frame(top_row)
-        self.toolbar.pack(side="right")
-
-        def _icon_btn(attr: str, icon: str, tip: str, cmd) -> None:
-            b = ttk.Button(self.toolbar, text=icon, width=4, command=cmd)
-            b.pack(side="left", padx=1)
-            setattr(self, attr, b)
-            self._tooltip_keys[attr] = tip
-            self._tooltips[attr] = _Tooltip(b, self._tr(tip))
-
-        _icon_btn("tb_remove_missing", "🧹", "Remove missing", self._remove_missing)
-        _icon_btn("tb_preview", "👁", "Preview", self._preview_selected)
-        _icon_btn("tb_open_selected_out", "📄", "Open selected output", self._open_selected_output)
-        _icon_btn("tb_open_selected_outdir", "📂", "Open selected out folder", self._open_selected_output_folder)
-        _icon_btn("tb_reveal_src", "🗂", "Reveal in Explorer", self._reveal_in_explorer)
-        _icon_btn("tb_toggle_adv", "⚙", "Advanced settings...", self._open_advanced_dialog)
-        self._adv_visible = False
-        # Aliases kept for older code paths (tooltips/retranslation refer to these names)
         self.tb_add = self.btn_add
         self.tb_remove_selected = self.btn_remove
-        # Filter row with a real placeholder (old version filtered by the placeholder text itself)
+        self.toolbar = ttk.Frame(top_row)
+        self.toolbar.pack(side="right")
+        for attr, icon, text, cmd in (
+            ("tb_remove_missing", "🧹", "Remove missing", self._remove_missing),
+            ("tb_preview", "👁", "Preview", self._preview_selected),
+            ("tb_open_selected_out", "📄", "Open selected output", self._open_selected_output),
+            ("tb_open_selected_outdir", "📂", "Open selected out folder", self._open_selected_output_folder),
+            ("tb_reveal_src", "🗂", "Reveal in Explorer", self._reveal_in_explorer),
+            ("tb_toggle_adv", "⚙", "Settings...", self._open_settings),
+        ):
+            b = ttk.Button(self.toolbar, text=icon, width=3, command=cmd, style="Icon.TButton")
+            b.pack(side="left", padx=1)
+            setattr(self, attr, b)
+            tip(attr, b, text)
+        self._adv_visible = False
+        # Filter with a real placeholder
         filter_row = ttk.Frame(self.frm_files)
-        filter_row.pack(fill="x", pady=(6, 0))
+        filter_row.pack(fill="x", pady=(10, 8))
         self.filter_var = tk.StringVar()
         self.ent_filter = ttk.Entry(filter_row, textvariable=self.filter_var)
         self.ent_filter.pack(fill="x")
@@ -2632,119 +2551,56 @@ class TranslatorGUI:
         def _filter_placeholder(show: bool) -> None:
             if show and not self.filter_var.get():
                 self._filter_placeholder_on = True
-                self.ent_filter.configure(foreground="#94a3b8")
-                self.filter_var.set("🔎 " + self._tr("Filter files..."))
+                self.ent_filter.configure(style="Placeholder.TEntry")
+                self.filter_var.set("🔎  " + self._tr("Filter files..."))
             elif not show and self._filter_placeholder_on:
                 self._filter_placeholder_on = False
-                self.ent_filter.configure(foreground="")
+                self.ent_filter.configure(style="TEntry")
                 self.filter_var.set("")
         self._filter_placeholder = _filter_placeholder
         self.ent_filter.bind("<FocusIn>", lambda e: _filter_placeholder(False))
         self.ent_filter.bind("<FocusOut>", lambda e: _filter_placeholder(True))
         self.ent_filter.bind("<KeyRelease>", lambda e: self._apply_filter("" if self._filter_placeholder_on else self.filter_var.get().strip()))
         _filter_placeholder(True)
-        self._tooltip_keys["ent_filter"] = "Type to filter by filename"
-        self._tooltips["ent_filter"] = _Tooltip(self.ent_filter, self._tr("Type to filter by filename"))
-
+        tip("ent_filter", self.ent_filter, "Type to filter by filename")
+        # Queue
+        tree_wrap = ttk.Frame(self.frm_files, style="Field.TFrame")
+        tree_wrap.pack(fill="both", expand=True)
         cols = ("dosya", "boyut", "durum", "eklenme")
-        self.tree = ttk.Treeview(self.frm_files, columns=cols, show="headings")
-        try:
-            self.tree.configure(borderwidth=0, highlightthickness=0)
-        except Exception:
-            pass
-        self.tree.heading("dosya", text=self._tr("File"))
+        self.tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=10, selectmode="extended")
+        self.tree.heading("dosya", text=self._tr("File"), anchor="w")
         self.tree.heading("boyut", text=self._tr("Size"))
         self.tree.heading("durum", text=self._tr("Status"))
         self.tree.heading("eklenme", text=self._tr("Added"))
-        self.tree.column("dosya", width=520, anchor="w")
-        self.tree.column("boyut", width=120, anchor="center")
-        self.tree.column("durum", width=140, anchor="center")
-        self.tree.column("eklenme", width=160, anchor="center")
-        # We'll store file path in iid text via separate hidden column-like
-        self.tree.pack(fill="both", expand=True, pady=6)
+        self.tree.column("dosya", width=320, minwidth=180, anchor="w", stretch=True)
+        self.tree.column("boyut", width=90, minwidth=70, anchor="e", stretch=False)
+        self.tree.column("durum", width=150, minwidth=100, anchor="center", stretch=False)
+        self.tree.column("eklenme", width=140, minwidth=110, anchor="center", stretch=False)
+        tree_scroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview, style="Modern.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+        tree_scroll.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._on_preview_event)
-        # Click to sort by column
-        try:
-            self.tree.heading("dosya", command=lambda c="dosya": self._sort_by_column(c))
-            self.tree.heading("boyut", command=lambda c="boyut": self._sort_by_column(c))
-            self.tree.heading("durum", command=lambda c="durum": self._sort_by_column(c))
-            self.tree.heading("eklenme", command=lambda c="eklenme": self._sort_by_column(c))
-        except Exception:
-            pass
-        # Alternating row colors
-        try:
-            self.tree.tag_configure('oddrow', background='#f3f6fb')
-            self.tree.tag_configure('evenrow', background='#ffffff')
-        except Exception:
-            pass
+        for c in cols:
+            self.tree.heading(c, command=lambda c=c: self._sort_by_column(c))
+        # Empty state shown over the list while the queue is empty
+        self.empty_state = tk.Frame(self.tree, bd=0, cursor="hand2")
+        self.lbl_empty_icon = tk.Label(self.empty_state, text="⇩", bd=0)
+        self.lbl_empty_icon.pack()
+        self.lbl_empty_title = tk.Label(self.empty_state, text="", bd=0)
+        self.lbl_empty_title.pack(pady=(4, 2))
+        self.lbl_empty_sub = tk.Label(self.empty_state, text="", bd=0)
+        self.lbl_empty_sub.pack()
+        for w in (self.empty_state, self.lbl_empty_icon, self.lbl_empty_title, self.lbl_empty_sub):
+            w.bind("<Button-1>", lambda e: self._add_files())
 
-        # Compact mode (reachable from the header menu; widget kept for retranslation/state)
-        self.chk_compact = ttk.Checkbutton(self.toolbar, text=self._tr("Compact mode"), variable=self.compact_mode_var, command=lambda: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
-        # Menu bar
-        try:
-            self.menubar = tk.Menu(self.root)
-            self.root.config(menu=self.menubar)
-            # Keep references for runtime retranslation
-            self.m_file = tk.Menu(self.menubar, tearoff=False)
-            self.m_view = tk.Menu(self.menubar, tearoff=False)
-            self.m_settings = tk.Menu(self.menubar, tearoff=False)
-            self.m_help = tk.Menu(self.menubar, tearoff=False)
-            self.menubar.add_cascade(label=self._tr("File"), menu=self.m_file)
-            self.menubar.add_cascade(label=self._tr("View"), menu=self.m_view)
-            self.menubar.add_cascade(label=self._tr("Settings"), menu=self.m_settings)
-            self.menubar.add_cascade(label=self._tr("Help"), menu=self.m_help)
-            # File
-            self.m_file.add_command(label=self._tr("Add..."), command=self._add_files)
-            self.m_file.add_separator()
-            self.m_file.add_command(label=self._tr("Exit"), command=self.root.destroy)
-            # View
-            self.m_view.add_checkbutton(label=self._tr("Dark theme"), onvalue=True, offvalue=False, variable=self.dark_mode_var, command=lambda: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
-            self.m_view.add_checkbutton(label=self._tr("Compact mode"), onvalue=True, offvalue=False, variable=self.compact_mode_var, command=lambda: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
-            if TBStyle is not None:
-                themes = ["flatly","darkly","cosmo","cyborg","journal","litera","lumen","minty","pulse","sandstone","simplex","solar","superhero","united","yeti"]
-                sm = tk.Menu(self.m_view, tearoff=False)
-                def _set_bs_theme(tname: str) -> None:
-                    try:
-                        self.bs_theme_var.set(tname)
-                        # Recreate or switch ttkbootstrap style consistently
-                        if getattr(self, '_bs', None) is None:
-                            self._bs = TBStyle(theme=tname, master=self.root)  # type: ignore
-                        else:
-                            try:
-                                self._bs.theme_use(tname)  # type: ignore
-                            except Exception:
-                                # Some versions require reinit for full apply
-                                self._bs = TBStyle(theme=tname, master=self.root)  # type: ignore
-                        # Re-apply component styles and refresh UI
-                        self._apply_bootstrap_styles()
-                        self.root.update_idletasks()
-                        self._save_settings()
-                    except Exception:
-                        pass
-                for th in themes:
-                    sm.add_radiobutton(label=th, value=th, variable=self.bs_theme_var, command=lambda tn=th: _set_bs_theme(tn))
-                self.m_view.add_cascade(label=self._tr("Bootstrap theme"), menu=sm)
-            # Font scale submenu
-            fm = tk.Menu(self.m_view, tearoff=False)
-            for scale in (0.9, 1.0, 1.1, 1.2, 1.3):
-                fm.add_radiobutton(label=f"{int(scale*100)}%", value=scale, variable=self.font_scale_var, command=lambda s=scale: (self.font_scale_var.set(s), self._apply_font_scale(), self._save_settings()))
-            self.m_view.add_cascade(label=self._tr("Font size"), menu=fm)
-            # Settings
-            self.m_settings.add_command(label=self._tr("Output settings..."), command=self._open_output_dialog)
-            self.m_settings.add_command(label=self._tr("Advanced settings..."), command=self._open_advanced_dialog)
-            self.m_settings.add_separator()
-            self.m_settings.add_command(label=self._tr("Preferences..."), command=self._open_preferences)
-            # Help
-            self.m_help.add_command(label=self._tr("About"), command=self._show_about)
-        except Exception:
-            pass
-
-        # Context menu on tree
+        # Context menu
         self.tree_menu = tk.Menu(self.root, tearoff=False)
         self.tree_menu.add_command(label=self._tr("Preview"), command=self._preview_selected)
         self.tree_menu.add_command(label=self._tr("Remove"), command=self._remove_selected)
         self.tree_menu.add_separator()
         self.tree_menu.add_command(label=self._tr("Open folder"), command=lambda: self._open_folder_selected())
+
         def _open_menu(ev):
             try:
                 iid = self.tree.identify_row(ev.y)
@@ -2754,39 +2610,59 @@ class TranslatorGUI:
             finally:
                 self.tree_menu.grab_release()
         self.tree.bind("<Button-3>", _open_menu)
-
-        # Drop target area (bind to tree)
         if TkinterDnD and DND_FILES:
-            try:
-                self.tree.drop_target_register(DND_FILES)  # type: ignore
-                self.tree.dnd_bind("<<Drop>>", self._on_drop)  # type: ignore
-            except Exception:
-                pass
-        # Ensure the tree has a minimum height
-        try:
-            self.tree.configure(height=10)
-        except Exception:
-            pass
+            for target in (self.tree, self.empty_state, self.lbl_empty_title):
+                try:
+                    target.drop_target_register(DND_FILES)  # type: ignore[attr-defined]
+                    target.dnd_bind("<<Drop>>", self._on_drop)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
 
-        # ---- Right panel: translation settings + start/cancel ----
-        tr_card = _RoundedCard(self.right_col, min_height=230)
-        tr_card.pack(fill="x", padx=6, pady=6)
-        self.lbl_translate_header = self._build_section_header(tr_card.content, self._tr("🌍 Translation"), ctx="primary")
+        # Log card
+        log_card = _RoundedCard(self.left_col, min_height=180)
+        log_card.pack(fill="x", padx=4, pady=(4, 4))
+        self.lbl_log_header = self._build_section_header(log_card.content, self._tr("📝 Log"))
+        frm_log = ttk.Frame(log_card.content)
+        frm_log.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        lvl = ttk.Frame(frm_log)
+        lvl.pack(fill="x", pady=(0, 6))
+        self.chk_log_info = ttk.Checkbutton(lvl, text=self._tr("Info"), variable=self.log_info_var, command=self._refresh_log_view)
+        self.chk_log_info.pack(side="left")
+        self.chk_log_ok = ttk.Checkbutton(lvl, text=self._tr("OK"), variable=self.log_ok_var, command=self._refresh_log_view)
+        self.chk_log_ok.pack(side="left", padx=(12, 0))
+        self.chk_log_err = ttk.Checkbutton(lvl, text=self._tr("Error"), variable=self.log_err_var, command=self._refresh_log_view)
+        self.chk_log_err.pack(side="left", padx=(12, 0))
+        self.btn_log_clear = ttk.Button(lvl, text=self._tr("Clear"), command=lambda: (self._log_entries.clear(), self._refresh_log_view()), style="Small.TButton")
+        self.btn_log_clear.pack(side="right")
+        self.btn_log_export = ttk.Button(lvl, text=self._tr("Export..."), command=self._export_logs, style="Small.TButton")
+        self.btn_log_export.pack(side="right", padx=(0, 6))
+        log_wrap = ttk.Frame(frm_log, style="Field.TFrame")
+        log_wrap.pack(fill="both", expand=True)
+        self.txt_log = tk.Text(log_wrap, height=6, wrap="word", bd=0, highlightthickness=0, padx=10, pady=8)
+        log_scroll = ttk.Scrollbar(log_wrap, orient="vertical", command=self.txt_log.yview, style="Modern.Vertical.TScrollbar")
+        self.txt_log.configure(yscrollcommand=log_scroll.set, state="disabled")
+        log_scroll.pack(side="right", fill="y")
+        self.txt_log.pack(side="left", fill="both", expand=True)
+
+        # Translation card (right)
+        tr_card = _RoundedCard(self.right_col, min_height=250)
+        tr_card.pack(fill="x", padx=4, pady=4)
+        self.lbl_translate_header = self._build_section_header(tr_card.content, self._tr("🌍 Translation"))
         frm_lang = ttk.Frame(tr_card.content)
-        frm_lang.pack(fill="x", padx=12, pady=(0, 10))
-        self.lbl_target = ttk.Label(frm_lang, text=self._tr("Target language:"))
+        frm_lang.pack(fill="x", padx=14, pady=(0, 14))
+        self.lbl_target = ttk.Label(frm_lang, text=self._tr("Target language:"), style="Muted.TLabel")
         self.lbl_target.pack(anchor="w")
         try:
             self._rebuild_target_lang_names()
         except Exception:
             pass
         self.cmb_lang = ttk.Combobox(frm_lang, values=(self.target_lang_names or self.lang_names), textvariable=self.target_lang_var, state="readonly", height=20)
-        self.cmb_lang.pack(fill="x", pady=(2, 10))
+        self.cmb_lang.pack(fill="x", pady=(4, 12))
         self.cmb_lang.bind("<<ComboboxSelected>>", lambda e: (self._maybe_update_output_suggestion(), self._save_settings()))
-        self.lbl_engine_main = ttk.Label(frm_lang, text=self._tr("Engine:"))
+        self.lbl_engine_main = ttk.Label(frm_lang, text=self._tr("Engine:"), style="Muted.TLabel")
         self.lbl_engine_main.pack(anchor="w")
-        eng_grid = ttk.Frame(frm_lang)
-        eng_grid.pack(fill="x", pady=(2, 10))
+        chips = ttk.Frame(frm_lang)
+        chips.pack(fill="x", pady=(4, 14))
         self.engine_radios: Dict[str, object] = {}
         engines = (
             ("auto", "Auto", "Google first, MyMemory as fallback"),
@@ -2796,250 +2672,100 @@ class TranslatorGUI:
             ("deepl_web", "DeepL (Web)", "DeepL website automation (experimental)"),
             ("libre", "Libre", "LibreTranslate (self-hosted or API key)"),
         )
-        for i, (val, txt, tip) in enumerate(engines):
-            rb = ttk.Radiobutton(eng_grid, text=self._tr(txt), value=val, variable=self.engine_var,
+        for i, (val, txt, ttip) in enumerate(engines):
+            rb = ttk.Radiobutton(chips, text=self._tr(txt), value=val, variable=self.engine_var, style="Chip.Toolbutton",
                                  command=lambda: (self._refresh_status_bar(), self._save_settings()))
-            rb.grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 16), pady=1)
+            rb.grid(row=i // 3, column=i % 3, sticky="ew", padx=2, pady=2)
             self.engine_radios[val] = rb
-            self._tooltip_keys[f"engine_{val}"] = tip
-            self._tooltips[f"engine_{val}"] = _Tooltip(rb, self._tr(tip))
+            tip(f"engine_{val}", rb, ttip)
+        for col in range(3):
+            chips.columnconfigure(col, weight=1, uniform="chips")
         run_row = ttk.Frame(frm_lang)
         run_row.pack(fill="x")
-        self.tb_start = ttk.Button(run_row, text=self._tr("▶ Start"), command=self._start, style="Primary.TButton")
-        self.tb_start.pack(side="left", fill="x", expand=True)
+        # Cancel is packed first so the expanding Start button can never squeeze it
         self.tb_cancel = ttk.Button(run_row, text=self._tr("⏹ Cancel"), command=self._cancel_run, state="disabled", style="Danger.TButton")
-        self.tb_cancel.pack(side="left", padx=(6, 0))
+        self.tb_cancel.pack(side="right", fill="y", padx=(6, 0))
+        self.tb_start = ttk.Button(run_row, text=self._tr("▶ Start"), command=self._start, style="Big.Accent.TButton")
+        self.tb_start.pack(side="left", fill="x", expand=True)
         self.tb_start_sel_text = tk.StringVar(value="▶ " + self._tr("Translate selected files"))
         self.tb_start_sel = ttk.Button(frm_lang, textvariable=self.tb_start_sel_text, command=self._start_selected)
-        self.tb_start_sel.pack(fill="x", pady=(6, 0))
-        for attr, tip in (("tb_start", "Start translation (Ctrl+R)"), ("tb_cancel", "Cancel (Esc)"),
-                          ("tb_start_sel", "Translate only the selected files (Ctrl+Shift+R)"),
-                          ("btn_add", "Add files (Ctrl+O)"), ("btn_remove", "Remove selected files from the list")):
-            self._tooltip_keys[attr] = tip
-            self._tooltips[attr] = _Tooltip(getattr(self, attr), self._tr(tip))
+        self.tb_start_sel.pack(fill="x", pady=(8, 0))
+        tip("tb_start", self.tb_start, "Start translation (Ctrl+R)")
+        tip("tb_cancel", self.tb_cancel, "Cancel (Esc)")
+        tip("tb_start_sel", self.tb_start_sel, "Translate only the selected files (Ctrl+Shift+R)")
+        tip("btn_add", self.btn_add, "Add files (Ctrl+O)")
+        tip("btn_remove", self.btn_remove, "Remove selected files from the list")
 
-        # Progress (right panel)
-        prog_card = _RoundedCard(self.right_col, min_height=180)
-        prog_card.pack(fill="both", expand=True, padx=6, pady=6)
-        self.lbl_progress_header = self._build_section_header(prog_card.content, self._tr("⌛ Progress"), ctx="primary")
+        # Progress card (right)
+        prog_card = _RoundedCard(self.right_col, min_height=230)
+        prog_card.pack(fill="both", expand=True, padx=4, pady=4)
+        self.lbl_progress_header = self._build_section_header(prog_card.content, self._tr("⌛ Progress"))
         frm_prog = ttk.Frame(prog_card.content)
-        frm_prog.pack(fill="x", padx=12, pady=(0, 10))
-        self.circ = _CircularProgress(frm_prog, size=150, thickness=14)
-        self.circ.pack(pady=(0, 8))
-        try:
-            self.circ.set(0, f"{self._tr('ETA')}: --:--")
-        except Exception:
-            pass
-        self.pbar = ttk.Progressbar(frm_prog, variable=self.progress_var, maximum=100)
+        frm_prog.pack(fill="x", padx=14, pady=(0, 14))
+        self.circ = _CircularProgress(frm_prog, size=148, thickness=12)
+        self.circ.pack(pady=(0, 10))
+        self.pbar = ttk.Progressbar(frm_prog, variable=self.progress_var, maximum=100, style="Thin.Horizontal.TProgressbar")
         self.pbar.pack(fill="x")
-        self.lbl_status = ttk.Label(frm_prog, textvariable=self.status_var, wraplength=340, justify="left")
-        self.lbl_status.pack(anchor="w", fill="x", pady=(6, 0))
+        self.lbl_status = ttk.Label(frm_prog, textvariable=self.status_var, wraplength=320, justify="left", style="Muted.TLabel")
+        self.lbl_status.pack(anchor="w", fill="x", pady=(8, 0))
 
-        # Advanced container with scrollable area
-        self.adv_container = ttk.Frame(self.root)
-        self.adv_canvas = tk.Canvas(self.adv_container, highlightthickness=0, bd=0)
-        self.adv_vscroll = ttk.Scrollbar(self.adv_container, orient="vertical", command=self.adv_canvas.yview, style="Modern.Vertical.TScrollbar")
-        self.adv_canvas.configure(yscrollcommand=self.adv_vscroll.set)
-        self.adv_canvas.pack(side="left", fill="both", expand=True)
-        # Ensure visible default height
-        try:
-            self.adv_canvas.configure(height=320)
-        except Exception:
-            pass
-        self.adv_vscroll.pack(side="right", fill="y")
-        self.adv_inner = ttk.Frame(self.adv_canvas)
-        self.adv_canvas.create_window((0, 0), window=self.adv_inner, anchor="nw")
-        self.adv_inner.bind("<Configure>", lambda e: self.adv_canvas.configure(scrollregion=self.adv_canvas.bbox("all")))
-        # Mouse-wheel support
-        def _adv_on_wheel(event):
-            delta = 0
-            if hasattr(event, 'delta') and event.delta:
-                delta = -1 * (event.delta // 120)
-            elif hasattr(event, 'num'):
-                delta = -1 if event.num == 4 else (1 if event.num == 5 else 0)
-            if delta:
-                self.adv_canvas.yview_scroll(delta, "units")
-        # Bind only while hovered; a global bind_all here used to hijack the main page's wheel
-        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.adv_canvas.bind(_seq, _adv_on_wheel)
-        # Resize advanced area proportionally as the window changes
-        self._adv_height_ratio = 0.4  # 40% of window height
-        def _on_root_resize(event):
-            try:
-                total_h = max(self.root.winfo_height(), 1)
-                target_h = int(total_h * self._adv_height_ratio)
-                self.adv_canvas.configure(height=max(220, target_h))
-            except Exception:
-                pass
-        self.root.bind('<Configure>', _on_root_resize)
-        # Set initial advanced canvas height proportionally
-        try:
-            self.root.update_idletasks()
-            init_total = max(self.root.winfo_height(), 1)
-            self.adv_canvas.configure(height=max(260, int(init_total * self._adv_height_ratio)))
-        except Exception:
-            pass
-
-        # Output options (moved to a separate window via menu; keep a hidden frame for i18n consistency)
-        self.frm_out = ttk.LabelFrame(self.adv_inner, text=self._tr("Output"), style="Card.TLabelframe")
-        # Do not pack here; shown in separate dialog
-        rowo1 = ttk.Frame(self.frm_out)
-        rowo1.pack(fill="x", pady=2)
-        self.save_next_var = tk.BooleanVar(value=True)
-        self.chk_save_next = ttk.Checkbutton(rowo1, text=self._tr("Save next to source"), variable=self.save_next_var)
-        self.chk_save_next.pack(side="left")
-        rowo2 = ttk.Frame(self.frm_out)
-        rowo2.pack(fill="x", pady=2)
-        self.lbl_outdir = ttk.Label(rowo2, text=self._tr("Output directory:"))
-        self.lbl_outdir.pack(side="left")
-        self.outdir_var = tk.StringVar(value="")
-        self.ent_outdir = ttk.Entry(rowo2, textvariable=self.outdir_var)
-        self.ent_outdir.pack(side="left", fill="x", expand=True, padx=6)
-        self.btn_browse = ttk.Button(rowo2, text=self._tr("Browse"), command=self._choose_outdir)
-        self.btn_browse.pack(side="left")
-        self.btn_open_out = ttk.Button(rowo2, text=self._tr("Open output folder"), command=self._open_outdir)
-        self.btn_open_out.pack(side="left", padx=6)
-        # Post-process options
-        rowo3 = ttk.Frame(self.frm_out)
-        rowo3.pack(fill="x", pady=2)
-        self.clean_after_var = tk.BooleanVar(value=False)
-        self.chk_clean = ttk.Checkbutton(rowo3, text=self._tr("Remove [bracketed] notes from SRT after translate"), variable=self.clean_after_var)
-        self.chk_clean.pack(side="left")
-        # PDF output mode
-        rowo4 = ttk.Frame(self.frm_out)
-        rowo4.pack(fill="x", pady=2)
-        ttk.Label(rowo4, text=self._tr("PDF output as:")).pack(side="left")
-        ttk.Radiobutton(rowo4, text=self._tr("PDF"), value="pdf", variable=self.pdf_mode_var).pack(side="left", padx=(8,0))
-        ttk.Radiobutton(rowo4, text=self._tr("TXT"), value="txt", variable=self.pdf_mode_var).pack(side="left", padx=(8,0))
-
-        # Log panel in rounded card
-        log_card = _RoundedCard(self.left_col, min_height=170)
-        log_card.pack(fill="both", expand=False, padx=6, pady=6)
-        self.lbl_log_header = self._build_section_header(log_card.content, self._tr("📝 Log"), ctx="secondary")
-        frm_log = ttk.Frame(log_card.content)
-        frm_log.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-        # Log level filters
-        lvl = ttk.Frame(frm_log)
-        lvl.pack(fill="x", pady=(0, 4))
-        self.chk_log_info = ttk.Checkbutton(lvl, text=self._tr("Info"), variable=self.log_info_var, command=self._refresh_log_view)
-        self.chk_log_info.pack(side="left")
-        self.chk_log_ok = ttk.Checkbutton(lvl, text=self._tr("OK"), variable=self.log_ok_var, command=self._refresh_log_view)
-        self.chk_log_ok.pack(side="left", padx=(8,0))
-        self.chk_log_err = ttk.Checkbutton(lvl, text=self._tr("Error"), variable=self.log_err_var, command=self._refresh_log_view)
-        self.chk_log_err.pack(side="left", padx=(8,0))
-        self.btn_log_clear = ttk.Button(lvl, text=self._tr("Clear"), command=lambda: (self._log_entries.clear(), self._refresh_log_view()))
-        self.btn_log_clear.pack(side="right")
-        self.btn_log_export = ttk.Button(lvl, text=self._tr("Export..."), command=self._export_logs)
-        self.btn_log_export.pack(side="right", padx=(0,6))
-        import tkinter.scrolledtext as scrolledtext
-        self.txt_log = scrolledtext.ScrolledText(frm_log, height=5, wrap="word")
-        self.txt_log.pack(fill="both", expand=True)
-        try:
-            self.txt_log.configure(relief="flat", borderwidth=0)
-            # Colored tags for levels
-            self.txt_log.tag_configure('info', foreground='#64748b')
-            self.txt_log.tag_configure('ok', foreground='#16a34a')
-            self.txt_log.tag_configure('error', foreground='#ef4444')
-        except Exception:
-            pass
-
-        # Footer: Output controls + status bar in rounded card
-        foot_card = _RoundedCard(self.root_scroll.content, min_height=80)
-        foot_card.pack(fill="x", padx=12, pady=(0, 8))
-        self.lbl_output_header = self._build_section_header(foot_card.content, self._tr("📦 Output"), ctx="secondary")
+        # Footer: output controls + status
+        foot_card = _RoundedCard(page, min_height=60)
+        foot_card.pack(fill="x", padx=14, pady=(4, 12))
+        self.lbl_output_header = self._build_section_header(foot_card.content, self._tr("📦 Output"))
         footer = ttk.Frame(foot_card.content)
-        footer.pack(fill="x", **pad)
-
-        # Keep references with context for theme updates
-        self.card_contexts = [
-            (files_card, 'info'),
-            (tr_card, 'primary'),
-            (prog_card, 'primary'),
-            (log_card, 'secondary'),
-            (foot_card, 'secondary'),
-        ]
-        left_foot = ttk.Frame(footer)
-        left_foot.pack(side="left", fill="x", expand=True)
-        self.chk_save_next_main = ttk.Checkbutton(left_foot, text=self._tr("Save next to source"), variable=self.save_next_var, command=self._save_settings)
+        footer.pack(fill="x", padx=14, pady=(0, 12))
+        self.chk_save_next_main = ttk.Checkbutton(footer, text=self._tr("Save next to source"), variable=self.save_next_var, command=self._save_settings)
         self.chk_save_next_main.pack(side="left")
-        self.lbl_outdir_main = ttk.Label(left_foot, text=self._tr("Output directory:"))
-        self.lbl_outdir_main.pack(side="left", padx=(10, 6))
-        self.ent_outdir_main = ttk.Entry(left_foot, textvariable=self.outdir_var, width=36)
-        self.ent_outdir_main.pack(side="left")
-        self.btn_browse_main = ttk.Button(left_foot, text=self._tr("Browse"), command=self._choose_outdir)
-        self.btn_browse_main.pack(side="left", padx=(6, 0))
-        self.btn_open_out_main = ttk.Button(left_foot, text=self._tr("Open output folder"), command=self._open_outdir)
-        self.btn_open_out_main.pack(side="left", padx=(6, 0))
-        # Own row under the output controls, so it is never squeezed/clipped by them
-        right_foot = ttk.Frame(foot_card.content)
-        right_foot.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
-        self.status_bar = ttk.Label(right_foot, text="")
-        self.status_bar.pack(side="right")
+        self.lbl_outdir_main = ttk.Label(footer, text=self._tr("Output directory:"), style="Muted.TLabel")
+        self.lbl_outdir_main.pack(side="left", padx=(16, 6))
+        # buttons are packed (from the right) before the expanding entry, so they are never squeezed
+        self.btn_open_out_main = ttk.Button(footer, text=self._tr("Open output folder"), command=self._open_outdir)
+        self.btn_open_out_main.pack(side="right", padx=(6, 0))
+        self.btn_browse_main = ttk.Button(footer, text=self._tr("Browse"), command=self._choose_outdir)
+        self.btn_browse_main.pack(side="right", padx=(6, 0))
+        self.ent_outdir_main = ttk.Entry(footer, textvariable=self.outdir_var, width=20)
+        self.ent_outdir_main.pack(side="left", fill="x", expand=True)
+        self.status_bar = ttk.Label(foot_card.content, text="", style="Muted.TLabel")
+        self.status_bar.pack(side="right", padx=14, pady=(0, 10))
+        self.card_contexts = [(files_card, ''), (log_card, ''), (tr_card, ''), (prog_card, ''), (foot_card, '')]
+        dnd_text = "(Drag-and-drop supported)" if (TkinterDnD and DND_FILES) else "(Install tkinterdnd2 for drag-and-drop)"
+        self.lbl_dnd = ttk.Label(foot_card.content, text=self._tr(dnd_text), style="Muted.TLabel")
+        self.lbl_dnd.pack(side="left", padx=14, pady=(0, 10))
 
-        # Advanced settings (no longer shown inline)
-        self.frm_adv = ttk.LabelFrame(self.adv_inner, text=self._tr("Advanced Settings"), style="Card.TLabelframe")
-        row1 = ttk.Frame(self.frm_adv)
-        row1.pack(fill="x", pady=2)
-        self.lbl_batch = ttk.Label(row1, text=self._tr("Batch size (Google batch):"))
-        self.lbl_batch.pack(side="left")
-        Spinbox = getattr(ttk, "Spinbox", tk.Spinbox)
-        spn_batch = Spinbox(row1, from_=10, to=500, textvariable=self.batch_size_var, width=8)
-        spn_batch.pack(side="left", padx=8)
-        row2 = ttk.Frame(self.frm_adv)
-        row2.pack(fill="x", pady=2)
-        self.lbl_mm = ttk.Label(row2, text=self._tr("Fallback concurrent jobs (MyMemory):"))
-        self.lbl_mm.pack(side="left")
-        spn_mm = Spinbox(row2, from_=1, to=16, textvariable=self.mm_workers_var, width=8)
-        spn_mm.pack(side="left", padx=8)
-        # Engine row
-        row_eng = ttk.Frame(self.frm_adv)
-        row_eng.pack(fill="x", pady=2)
-        self.lbl_engine = ttk.Label(row_eng, text=self._tr("Engine:"))
-        self.lbl_engine.pack(side="left")
-        self.cmb_engine = ttk.Combobox(row_eng, values=["auto", "google", "mymemory", "deepl", "deepl_web", "libre"], textvariable=self.engine_var, state="readonly", width=12)
-        self.cmb_engine.pack(side="left", padx=8)
-        self.lbl_auto_priority = ttk.Label(row_eng, text=self._tr("Auto priority:"))
-        self.lbl_auto_priority.pack(side="left", padx=(12, 4))
-        self.auto_priority_var = tk.StringVar(value="google_first")
-        self.cmb_auto_priority = ttk.Combobox(row_eng, values=["google_first", "mymemory_first"], textvariable=self.auto_priority_var, state="readonly", width=16)
-        self.cmb_auto_priority.pack(side="left")
-        # Custom dictionary row
-        row_dict = ttk.Frame(self.frm_adv)
-        row_dict.pack(fill="x", pady=2)
-        ttk.Label(row_dict, text=self._tr("Custom dictionary:")).pack(side="left")
-        self.cmb_dict_mode = ttk.Combobox(row_dict, values=["off", "pre", "post", "both"], textvariable=self.dict_mode_var, state="readonly", width=8)
-        self.cmb_dict_mode.pack(side="left", padx=6)
-        self.ent_dict = ttk.Entry(row_dict, textvariable=self.dict_path_var)
-        self.ent_dict.pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row_dict, text=self._tr("Browse"), command=self._choose_dict).pack(side="left")
-
-        # Appearance & performance (no longer shown inline)
-        self.frm_perf = ttk.LabelFrame(self.adv_inner, text=self._tr("Appearance & Performance"), style="Card.TLabelframe")
-        rowp1 = ttk.Frame(self.frm_perf)
-        rowp1.pack(fill="x", pady=2)
-        self.chk_dark = ttk.Checkbutton(rowp1, text=self._tr("Dark theme"), variable=self.dark_mode_var, command=self._apply_theme)
-        self.chk_dark.pack(side="left")
-        rowp2 = ttk.Frame(self.frm_perf)
-        rowp2.pack(fill="x", pady=2)
-        self.chk_parallel = ttk.Checkbutton(rowp2, text=self._tr("Translate files in parallel"), variable=self.parallel_files_var)
-        self.chk_parallel.pack(side="left")
-        self.lbl_workers = ttk.Label(rowp2, text=self._tr("Workers:"))
-        self.lbl_workers.pack(side="left", padx=(10, 0))
-        spn_fw = Spinbox(rowp2, from_=1, to=4, textvariable=self.file_workers_var, width=5)
-        spn_fw.pack(side="left", padx=8)
-        # Preview button
+        # ---- hidden widgets kept for dialogs / retranslation compatibility ----
+        self._hidden = ttk.Frame(self.root)
+        self.adv_container = self._hidden
+        self.adv_inner = self._hidden
+        self.adv_canvas = tk.Canvas(self._hidden)
+        self.sep_hdr = ttk.Separator(self._hidden)
+        self.frm_out = ttk.LabelFrame(self._hidden, text=self._tr("Output"))
+        self.chk_save_next = ttk.Checkbutton(self.frm_out, text=self._tr("Save next to source"), variable=self.save_next_var)
+        self.lbl_outdir = ttk.Label(self.frm_out, text=self._tr("Output directory:"))
+        self.ent_outdir = ttk.Entry(self.frm_out, textvariable=self.outdir_var)
+        self.btn_browse = ttk.Button(self.frm_out, text=self._tr("Browse"), command=self._choose_outdir)
+        self.btn_open_out = ttk.Button(self.frm_out, text=self._tr("Open output folder"), command=self._open_outdir)
+        self.chk_clean = ttk.Checkbutton(self.frm_out, text=self._tr("Remove [bracketed] notes from SRT after translate"), variable=self.clean_after_var)
+        self.frm_adv = ttk.LabelFrame(self._hidden, text=self._tr("Advanced Settings"))
+        self.lbl_batch = ttk.Label(self.frm_adv, text=self._tr("Batch size (Google batch):"))
+        self.lbl_mm = ttk.Label(self.frm_adv, text=self._tr("Fallback concurrent jobs (MyMemory):"))
+        self.lbl_engine = ttk.Label(self.frm_adv, text=self._tr("Engine:"))
+        self.cmb_engine = ttk.Combobox(self.frm_adv, values=["auto", "google", "mymemory", "deepl", "deepl_web", "libre"], textvariable=self.engine_var, state="readonly")
+        self.lbl_auto_priority = ttk.Label(self.frm_adv, text=self._tr("Auto priority:"))
+        self.cmb_auto_priority = ttk.Combobox(self.frm_adv, values=["google_first", "mymemory_first"], textvariable=self.auto_priority_var, state="readonly")
+        self.frm_perf = ttk.LabelFrame(self._hidden, text=self._tr("Appearance & Performance"))
+        self.chk_dark = ttk.Checkbutton(self.frm_perf, text=self._tr("Dark theme"), variable=self.dark_mode_var, command=self._apply_theme)
+        self.chk_parallel = ttk.Checkbutton(self.frm_perf, text=self._tr("Translate files in parallel"), variable=self.parallel_files_var)
+        self.lbl_workers = ttk.Label(self.frm_perf, text=self._tr("Workers:"))
         self.btn_preview = ttk.Button(self.frm_perf, text=self._tr("Preview"), command=self._preview_selected)
-        self.btn_preview.pack(anchor="w", pady=4)
+        self.chk_compact = ttk.Checkbutton(self._hidden, text=self._tr("Compact mode"), variable=self.compact_mode_var)
 
-        # Initially keep advanced sections hidden (advanced moved to separate dialog)
-        self._adv_visible = False
-        # initial theme and i18n
+        # initial design + texts (window is still hidden here)
         self._apply_theme()
         self._retranslate_ui(initial=True)
-        self._apply_settings_to_ui()
-        self._apply_bootstrap_styles()
         self._apply_font_scale()
         self._ensure_ui_font_family()
+        self._update_empty_state()
         # Shortcuts
         self.root.bind_all("<Control-o>", lambda e: self._add_files())
         self.root.bind_all("<Control-O>", lambda e: self._add_files())
@@ -3047,123 +2773,17 @@ class TranslatorGUI:
         self.root.bind_all("<Control-R>", lambda e: self._start())
         self.root.bind_all("<Control-Shift-R>", lambda e: self._start_selected())
         self.root.bind_all("<Escape>", lambda e: self._cancel_run())
-        # Queue save/load buttons
-        # Queue controls moved to advanced dialog
-        # Dictionary options
-        # Dict options moved to advanced dialog; keep variables
-        self.dict_case_ins_var = tk.BooleanVar(value=False)
-        self.dict_word_boundary_var = tk.BooleanVar(value=False)
-        # NOTE: log filter vars / _log_entries / _sort_reverse are created at the top of
-        # _build_ui. Re-creating them here (as before) detached the log filter checkboxes.
         self._refresh_status_bar()
 
-    def _flatten_borders_recursive(self, widget, bg_color: str | None = None) -> None:
+    def _update_empty_state(self) -> None:
+        """Big drop target over the queue while it is empty."""
         try:
-            try:
-                if bg_color is not None:
-                    widget.configure(borderwidth=0, highlightthickness=0, relief="flat", background=bg_color)
-                else:
-                    widget.configure(borderwidth=0, highlightthickness=0, relief="flat")
-            except Exception:
-                pass
-            for child in widget.winfo_children():
-                self._flatten_borders_recursive(child, bg_color)
-        except Exception:
-            pass
-
-    def _apply_theme_to_toplevel(self, win) -> None:
-        try:
-            # Bind ttkbootstrap style to this toplevel if available
-            if TBStyle is not None and getattr(self, '_bs', None) is not None:
-                try:
-                    self._bs.style.master = win  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-            bg = None
-            fg = None
-            try:
-                bg = self._bs.colors.bg if getattr(self, '_bs', None) is not None else self.root.cget('bg')
-                fg = self._bs.colors.fg if getattr(self, '_bs', None) is not None else '#ffffff'
-            except Exception:
-                bg = self.root.cget('bg')
-                fg = '#ffffff'
-            try:
-                win.configure(bg=bg, highlightthickness=0)
-            except Exception:
-                pass
-            try:
-                for w in win.winfo_children():
-                    try:
-                        # Tk widgetlerde fg de uygulanabilir
-                        if hasattr(w, 'configure'):
-                            try:
-                                w.configure(bg=bg, fg=fg)
-                            except Exception:
-                                w.configure(bg=bg)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        except Exception:
-            pass
-    def _apply_bg_recursive(self, widget, bg: str) -> None:
-        try:
-            # Apply to Tk widgets where possible; ttk may ignore 'bg'
-            for w in ([widget] + list(widget.winfo_children())):
-                try:
-                    w.configure(bg=bg)
-                except Exception:
-                    pass
-            # --- Update custom titlebar colors to match theme ---
-            try:
-                if hasattr(self, 'titlebar'):
-                    bgc = self._bs.colors.bg if getattr(self, '_bs', None) is not None else self.root.cget('bg')
-                    fgc = self._bs.colors.fg if getattr(self, '_bs', None) is not None else '#ffffff'
-                    self.titlebar.configure(bg=bgc)
-                    for w in self.titlebar.winfo_children():
-                        try:
-                            if isinstance(w, (tk.Label, tk.Button, tk.Frame)):
-                                # Some widgets (like Frame) may not support fg
-                                try:
-                                    w.configure(bg=bgc, fg=fgc)
-                                except Exception:
-                                    w.configure(bg=bgc)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            # Tema değiştiğinde titlebar ve menü bar renklerini güncelle
-            try:
-                bgc = self._bs.colors.bg if getattr(self, '_bs', None) is not None else self.root.cget('bg')
-                fgc = self._contrast_fg(self.root, bgc)
-                # Titlebar
-                if hasattr(self, 'titlebar'):
-                    self.titlebar.configure(bg=bgc)
-                    for b in self.titlebar.winfo_children():
-                        if isinstance(b, tk.Label):
-                            # Başlık etiketi için bg ve fg güncelle
-                            b.configure(bg=bgc, fg=fgc)
-                        elif isinstance(b, tk.Frame):
-                            # Frame için bg güncelle
-                            b.configure(bg=bgc)
-                            # Frame içindeki butonlar için sadece bg güncelle, fg'yi koru (özel renkler)
-                            for c in b.winfo_children():
-                                if isinstance(c, tk.Label):
-                                    c.configure(bg=bgc)
-                # Menü bar
-                if hasattr(self, 'menu_bar'):
-                    self.menu_bar.configure(bg=bgc)
-                    for w in self.menu_bar.winfo_children():
-                        if isinstance(w, tk.Label):
-                            w.configure(bg=bgc, fg=fgc)
-                # Top spacer
-                if hasattr(self, '_top_spacer'):
-                    try:
-                        self._top_spacer.configure(bg=bgc)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            self.lbl_empty_title.configure(text=self._tr("Drop subtitle or document files here"))
+            self.lbl_empty_sub.configure(text=self._tr("or click Add... to choose files") + "   ·   SRT · VTT · TXT · MD · CSV · DOCX · PDF")
+            if self.tree.get_children(""):
+                self.empty_state.place_forget()
+            else:
+                self.empty_state.place(relx=0.5, rely=0.55, anchor="center")
         except Exception:
             pass
 
@@ -3179,6 +2799,7 @@ class TranslatorGUI:
             return str(n)
 
     def _refresh_status_bar(self) -> None:
+        self._update_empty_state()
         try:
             cnt = len(self.files)
             # Uses the hand-checked keys ("light"/"theme" alone were mistranslated, e.g. ja "光")
@@ -3309,11 +2930,11 @@ class TranslatorGUI:
             self.root.title(tr("title"))
             # Header quick labels
             if hasattr(self, 'lbl_hdr_theme'):
-                self.lbl_hdr_theme.configure(text=self._tr("Theme:"))
+                pass  # header uses icons + tooltips
             if hasattr(self, 'lbl_hdr_accent'):
-                self.lbl_hdr_accent.configure(text=self._tr("Accent color:"))
+                pass  # header uses icons + tooltips
             if hasattr(self, 'lbl_hdr_ui'):
-                self.lbl_hdr_ui.configure(text=self._tr("UI language:"))
+                pass  # header uses icons + tooltips
             if hasattr(self, 'lbl_files_header'):
                 self.lbl_files_header.configure(text=self._tr("📁 Files"))
             if hasattr(self, 'lbl_tools_header'):
@@ -3533,59 +3154,6 @@ class TranslatorGUI:
     def _on_preview_event(self, event=None) -> None:
         self._preview_selected()
 
-    def _preview_selected(self) -> None:
-        sel = self.tree.selection()
-        if not sel:
-            return
-        iid = sel[0]
-        path = self.item_to_path.get(iid)
-        if not path or not os.path.isfile(path):
-            return
-        try:
-            ext = os.path.splitext(path)[1].lower()
-            sample = ""
-            if ext in (".srt", ".vtt", ".txt", ".md", ".csv"):
-                with open(path, "r", encoding="utf-8", newline="") as f:
-                    sample = "".join([f.readline() for _ in range(20)])
-            elif ext == ".docx" and DocxDocument:
-                doc = DocxDocument(path)
-                parts = [p.text for p in doc.paragraphs[:20]]
-                sample = "\n".join(parts)
-            elif ext == ".pdf" and pdf_extract_text:
-                txt = (pdf_extract_text(path) or "").splitlines()
-                sample = "\n".join(txt[:20])
-            lang_hint = self._detect_language_hint(sample)
-        except Exception as e:
-            sample = f"Error reading file: {e}"
-            lang_hint = "?"
-
-        win = tk.Toplevel(self.root)
-        try:
-            if TBStyle is not None and getattr(self, '_bs', None) is not None:
-                self._bs.style.master = win  # type: ignore[attr-defined]
-            self._apply_theme()
-        except Exception:
-            pass
-        win.title(self._tr("Preview"))
-        try:
-            self._apply_theme_to_toplevel(win)
-        except Exception:
-            pass
-        win.geometry("700x420")
-        win.transient(self.root)
-        win.grab_set()
-        frm = ttk.Frame(win)
-        frm.pack(fill="both", expand=True, padx=10, pady=10)
-        hdr = ttk.Frame(frm)
-        hdr.pack(fill="x")
-        ttk.Label(hdr, text=os.path.basename(path)).pack(side="left")
-        ttk.Label(hdr, text=f" | {self._tr('Lang:')} {lang_hint}").pack(side="left", padx=8)
-        import tkinter.scrolledtext as scrolledtext
-        txt = scrolledtext.ScrolledText(frm, wrap="word")
-        txt.pack(fill="both", expand=True, pady=6)
-        txt.insert("1.0", sample)
-        txt.configure(state="disabled")
-
     def _detect_language_hint(self, text: str) -> str:
         try:
             if not text.strip():
@@ -3625,455 +3193,6 @@ class TranslatorGUI:
                 result = result.replace(src, dst)
         return result
 
-    def fix_window_focus(self):
-        """Pencerenin focus kaybettiğinde kaybolmamasını sağlar."""
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            GWL_EXSTYLE = -20
-            WS_EX_APPWINDOW = 0x00040000
-            WS_EX_TOOLWINDOW = 0x00000080
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            style = style & ~WS_EX_TOOLWINDOW
-            style = style | WS_EX_APPWINDOW
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-            self.root.withdraw()
-            self.root.after(10, self.root.deiconify)
-        except Exception:
-            pass
-
-    def enable_drag(self):
-        def start_move(event):
-            self._x = event.x
-            self._y = event.y
-        def stop_move(_event):
-            self._x = None
-            self._y = None
-        def on_motion(event):
-            x = self.root.winfo_pointerx() - self._x
-            y = self.root.winfo_pointery() - self._y
-            self.root.geometry(f"+{x}+{y}")
-        try:
-            self.titlebar.bind("<ButtonPress-1>", start_move)
-            self.titlebar.bind("<ButtonRelease-1>", stop_move)
-            self.titlebar.bind("<B1-Motion>", on_motion)
-        except Exception:
-            pass
-
-    def _apply_theme_impl(self) -> None:
-        try:
-            # If ttkbootstrap is available, prefer its theming and avoid overriding with manual styles
-            if TBStyle is not None:
-                try:
-                    theme = (self.bs_theme_var.get() or '').strip()
-                    if not theme:
-                        theme = self._default_bs_theme()
-                    if getattr(self, '_bs', None) is None:
-                        self._bs = TBStyle(theme=theme, master=self.root)  # type: ignore
-                    else:
-                        try:
-                            self._bs.theme_use(theme)  # type: ignore
-                        except Exception:
-                            self._bs = TBStyle(theme=theme, master=self.root)  # type: ignore
-                    # Apply component styles for the selected theme (we will still apply our overrides below)
-                    self._apply_bootstrap_styles()
-                    self.root.update_idletasks()
-                except Exception:
-                    # fall back to manual ttk styling
-                    pass
-            if self.dark_mode_var.get():
-                # Softer dark palette
-                bg = "#0f1319"
-                fg = "#e6eaf0"
-                acc_map = {
-                    "blue": "#5ea1ff",
-                    "purple": "#a78bfa",
-                    "green": "#34d399",
-                    "orange": "#fbbf24",
-                    "pink": "#f472b6",
-                    "teal": "#2dd4bf",
-                }
-                acc = acc_map.get(self.accent_var.get(), "#5ea1ff")
-                panel = "#121722"
-                surface = "#151b26"
-                border = "#232a36"
-                self.root.configure(bg=bg)
-                try:
-                    # Global defaults to avoid white tk backgrounds/edges
-                    self.root.option_add("*Background", bg)
-                    self.root.option_add("*Foreground", fg)
-                    self.root.option_add("*foreground", fg)
-                    self.root.option_add("*highlightBackground", bg)
-                    self.root.option_add("*highlightColor", bg)
-                    self.root.option_add("*activeBackground", bg)
-                    self.root.option_add("*selectBackground", acc)
-                except Exception:
-                    pass
-                self._style.theme_use("clam")
-                for sty in ("TFrame", "TLabel", "TLabelframe", "TLabelframe.Label"):
-                    self._style.configure(sty, background=bg, foreground=fg)
-                # Also enforce base widget fg/bg to avoid white bars
-                self._style.configure("TLabel", background=bg, foreground=fg)
-                self._style.configure("TCheckbutton", background=bg, foreground=fg)
-                self._style.configure("TButton", background=surface, foreground=fg)
-                # Flatten borders completely
-                self._style.configure("TFrame", borderwidth=0, relief="flat")
-                self._style.configure("TLabelframe", borderwidth=0, relief="flat", bordercolor=bg, lightcolor=bg, darkcolor=bg)
-                self._style.configure("TLabelframe.Label", background=bg)
-                # Minimize default highlights/borders
-                try:
-                    self.root.option_add("*highlightThickness", 0)
-                    self.root.option_add("*borderWidth", 0)
-                    self.root.option_add("*activeBackground", bg)
-                    self.root.option_add("*selectForeground", fg)
-                except Exception:
-                    pass
-                # Rounded look using reliefs and padding
-                self._style.configure("TLabelframe", relief="flat", borderwidth=0)
-                self._style.configure("TLabelframe.Label", padding=(6, 0, 6, 0))
-                btn_pad = (8, 4) if self.compact_mode_var.get() else (12, 8)
-                self._style.configure("TButton", background=surface, foreground=fg, padding=btn_pad, borderwidth=0)
-                self._style.map("TButton", background=[("active", acc)], foreground=[("active", "#ffffff")])
-                self._style.configure("Treeview", background=surface, fieldbackground=surface, foreground=fg, bordercolor=border, relief="flat")
-                self._style.configure("Treeview.Heading", background=panel, foreground=fg)
-                try:
-                    self._style.map('Treeview', background=[('selected', '#204060')], foreground=[('selected', '#ffffff')])
-                    # Prevent white-on-white headers on hover/press in dark theme
-                    self._style.map('Treeview.Heading',
-                                     background=[('active', panel), ('pressed', '#1a2740')],
-                                     foreground=[('active', fg), ('pressed', '#ffffff')])
-                except Exception:
-                    pass
-                # Notebook and tabs
-                try:
-                    self._style.configure('TNotebook', background=panel, bordercolor=border)
-                    self._style.configure('TNotebook.Tab', background=surface, foreground=fg)
-                    self._style.map('TNotebook.Tab', background=[('selected', '#1a2740'), ('active', surface)], foreground=[('selected', '#ffffff'), ('active', fg)])
-                except Exception:
-                    pass
-                # Zebra rows
-                try:
-                    self.tree.tag_configure('oddrow', background='#18202b')
-                    self.tree.tag_configure('evenrow', background='#141b25')
-                except Exception:
-                    pass
-                self._style.configure("TProgressbar", troughcolor=panel, background=acc)
-                # Header/app separator (dark)
-                try:
-                    self._style.configure("AppSeparator.TSeparator", background=border)
-                    self._style.configure("AppSeparator.TSeparator", thickness=1)
-                except Exception:
-                    pass
-                # Inputs and menus
-                try:
-                    self._style.configure("TEntry", fieldbackground=surface, foreground=fg, bordercolor=border, relief="flat")
-                    self._style.configure("Toolbar.TEntry", fieldbackground=surface, foreground=fg, bordercolor=border, relief="flat")
-                    self._style.map("TEntry", fieldbackground=[('readonly', surface), ('active', surface)], foreground=[('readonly', fg), ('active', fg)])
-                    self._style.map("Toolbar.TEntry", fieldbackground=[('readonly', surface), ('active', surface)], foreground=[('readonly', fg), ('active', fg)])
-                    self._style.configure("TCombobox", fieldbackground=surface, foreground=fg, background=surface, bordercolor=border, relief="flat")
-                    self._style.map("TCombobox", fieldbackground=[('readonly', surface), ('active', surface)], foreground=[('readonly', fg), ('active', fg)])
-                    self.root.option_add("*TCombobox*Listbox.background", panel)
-                    self.root.option_add("*TCombobox*Listbox.foreground", fg)
-                    self.root.option_add("*TCombobox*Listbox.selectBackground", acc)
-                    self.root.option_add("*TCombobox*Listbox.selectForeground", '#ffffff')
-                    self.root.option_add("*Entry*highlightThickness", 0)
-                    self.root.option_add("*Combobox*highlightThickness", 0)
-                    self._style.configure("Toolbar.TCheckbutton", background=surface, foreground=fg)
-                    # Ensure key comboboxes adopt dark style
-                    try:
-                        for cb_name in [
-                            'cmb_theme','cmb_accent','cmb_ui_quick','cmb_lang',
-                            'cmb_engine','cmb_auto_priority','cmb_dict_mode'
-                        ]:
-                            if hasattr(self, cb_name):
-                                getattr(self, cb_name).configure(style='TCombobox')
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-                try:
-                    self._style.configure("TMenubutton", background=panel, foreground=fg)
-                    self._style.configure("TSeparator", background=panel)
-                    # Some ttk builds need separate style name
-                    self._style.configure("Separator", background=panel)
-                except Exception:
-                    pass
-                # App header & buttons
-                self._style.configure("AppHeader.TFrame", background="#0e141c")
-                self._style.configure("AppHeader.TLabel", background="#0e141c", foreground=fg)
-                # Windows titlebar dark-aware
-                try:
-                    _enable_win_dark_titlebar(self.root.winfo_id(), True)
-                except Exception:
-                    pass
-                # Header separator color
-                try:
-                    if hasattr(self, 'sep_hdr'):
-                        self.sep_hdr.configure(bg=border)
-                except Exception:
-                    pass
-                self._style.configure("Primary.TButton", background=acc, foreground="#ffffff", padding=btn_pad)
-                self._style.map("Primary.TButton", background=[("active", "#4c8af5")])
-                self._style.configure("Danger.TButton", background="#f05252", foreground="#ffffff", padding=btn_pad)
-                self._style.map("Danger.TButton", background=[("active", "#ef4444")])
-                # Ensure all frames have flat borders to avoid white lines
-                try:
-                    self._flatten_borders_recursive(self.root, bg)
-                except Exception:
-                    pass
-                # Ensure any open Toplevels inherit theme
-                try:
-                    for w in self.root.winfo_children():
-                        if isinstance(w, tk.Toplevel) or w.winfo_class() == 'Toplevel':
-                            self._apply_theme_to_toplevel(w)
-                except Exception:
-                    pass
-                try:
-                    self.txt_log.configure(bg="#121418", fg=fg, insertbackground=fg)
-                except Exception:
-                    pass
-                try:
-                    self.circ.set_color(acc)
-                except Exception:
-                    pass
-                # Canvas and menu backgrounds (dark)
-                try:
-                    if hasattr(self, 'root_scroll') and hasattr(self.root_scroll, 'canvas'):
-                        self.root_scroll.canvas.configure(bg=bg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'adv_canvas'):
-                        self.adv_canvas.configure(bg=bg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'circ') and hasattr(self.circ, 'canvas'):
-                        self.circ.canvas.configure(bg=panel)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'menubar'):
-                        self.menubar.configure(bg=panel, fg=fg, activebackground=surface, activeforeground=fg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'header_menu'):
-                        self.header_menu.configure(bg=panel, fg=fg, activebackground=surface, activeforeground=fg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'tree_menu') and self.tree_menu is not None:
-                        self.tree_menu.configure(bg=panel, fg=fg, activebackground=surface, activeforeground=fg)
-                except Exception:
-                    pass
-                # Rounded cards colors
-                try:
-                    for card in (getattr(self, 'cards', []) or []):
-                        card.set_colors(fill="#151b26", shadow="#0a0f16")
-                    # Card styles (inner frames & labelframes)
-                    self._style.configure("CardInner.TFrame", background="#151b26")
-                    try:
-                        if hasattr(self, 'toolbar'):
-                            self.toolbar.configure(bg="#151b26")
-                    except Exception:
-                        pass
-                    self._style.configure("Card.TLabelframe", background="#151b26", borderwidth=0, relief="flat")
-                    self._style.configure("Card.TLabelframe.Label", background="#151b26", foreground=fg)
-                except Exception:
-                    pass
-            else:
-                # Softer light palette
-                bg = "#f5f7fb"
-                fg = "#1e2430"
-                acc_map = {
-                    "blue": "#3b82f6",
-                    "purple": "#8b5cf6",
-                    "green": "#22c55e",
-                    "orange": "#f59e0b",
-                    "pink": "#ec4899",
-                    "teal": "#14b8a6",
-                }
-                acc = acc_map.get(self.accent_var.get(), "#3b82f6")
-                panel = "#ffffff"
-                surface = "#ffffff"
-                border = "#e9edf4"
-                self.root.configure(bg=bg)
-                try:
-                    self.root.option_add("*Background", bg)
-                    self.root.option_add("*Foreground", fg)
-                    self.root.option_add("*foreground", fg)
-                    self.root.option_add("*highlightBackground", bg)
-                    self.root.option_add("*highlightColor", bg)
-                    self.root.option_add("*activeBackground", bg)
-                    self.root.option_add("*selectBackground", acc)
-                except Exception:
-                    pass
-                self._style.theme_use("clam")
-                for sty in ("TFrame", "TLabel", "TLabelframe", "TLabelframe.Label"):
-                    self._style.configure(sty, background=bg, foreground=fg)
-                self._style.configure("TLabel", background=bg, foreground=fg)
-                self._style.configure("TCheckbutton", background=bg, foreground=fg)
-                self._style.configure("TButton", background=surface, foreground=fg)
-                self._style.configure("TFrame", borderwidth=0, relief="flat")
-                self._style.configure("TLabelframe", borderwidth=0, relief="flat", bordercolor=bg, lightcolor=bg, darkcolor=bg)
-                self._style.configure("TLabelframe.Label", background=bg)
-                try:
-                    self.root.option_add("*highlightThickness", 0)
-                    self.root.option_add("*borderWidth", 0)
-                    self.root.option_add("*activeBackground", bg)
-                    self.root.option_add("*selectForeground", fg)
-                except Exception:
-                    pass
-                self._style.configure("TLabelframe", relief="flat", borderwidth=0)
-                self._style.configure("TLabelframe.Label", padding=(6, 0, 6, 0))
-                btn_pad = (8, 4) if self.compact_mode_var.get() else (12, 8)
-                self._style.configure("TButton", background=panel, foreground=fg, padding=btn_pad, borderwidth=0)
-                self._style.map("TButton", background=[("active", acc)], foreground=[("active", "#ffffff")])
-                self._style.configure("Treeview", background=surface, fieldbackground=surface, foreground=fg, bordercolor=border, relief="flat")
-                self._style.configure("Treeview.Heading", background="#f0f2f7", foreground=fg)
-                try:
-                    self._style.map('Treeview', background=[('selected', '#dbeafe')], foreground=[('selected', '#1e293b')])
-                    # Prevent white-on-white headers on hover/press in light theme
-                    self._style.map('Treeview.Heading',
-                                     background=[('active', '#e8edf7'), ('pressed', '#dbeafe')],
-                                     foreground=[('active', fg), ('pressed', '#1e293b')])
-                except Exception:
-                    pass
-                # Notebook and tabs
-                try:
-                    self._style.configure('TNotebook', background=panel, bordercolor=border)
-                    self._style.configure('TNotebook.Tab', background=surface, foreground=fg)
-                    self._style.map('TNotebook.Tab', background=[('selected', '#e8f1ff')], foreground=[('selected', '#1e2430')])
-                except Exception:
-                    pass
-                # Zebra rows
-                try:
-                    self.tree.tag_configure('oddrow', background='#f1f4fa')
-                    self.tree.tag_configure('evenrow', background='#ffffff')
-                except Exception:
-                    pass
-                self._style.configure("TProgressbar", troughcolor="#eef2f7", background=acc)
-                # Header/app separator (light)
-                try:
-                    self._style.configure("AppSeparator.TSeparator", background=border)
-                    self._style.configure("AppSeparator.TSeparator", thickness=1)
-                except Exception:
-                    pass
-                # Inputs and menus
-                try:
-                    self._style.configure("TEntry", fieldbackground=surface, foreground=fg)
-                    self._style.map("TEntry", fieldbackground=[('active', surface)])
-                    self._style.configure("TCombobox", fieldbackground=surface, foreground=fg, background=surface, bordercolor=border, relief="flat")
-                    self._style.map("TCombobox", fieldbackground=[('active', surface)], foreground=[('active', fg)])
-                    self.root.option_add("*TCombobox*Listbox.background", '#ffffff')
-                    self.root.option_add("*TCombobox*Listbox.foreground", fg)
-                    self.root.option_add("*TCombobox*Listbox.selectBackground", acc)
-                    self.root.option_add("*TCombobox*Listbox.selectForeground", '#ffffff')
-                    self.root.option_add("*Entry*highlightThickness", 0)
-                    self.root.option_add("*Combobox*highlightThickness", 0)
-                except Exception:
-                    pass
-                try:
-                    self._style.configure("TMenubutton", background=panel, foreground=fg)
-                    self._style.configure("TSeparator", background="#e6ebf5")
-                    self._style.configure("Separator", background="#e6ebf5")
-                except Exception:
-                    pass
-                self._style.configure("AppHeader.TFrame", background="#edf2fe")
-                self._style.configure("AppHeader.TLabel", background="#edf2fe", foreground=fg)
-                try:
-                    _enable_win_dark_titlebar(self.root.winfo_id(), False)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'sep_hdr'):
-                        self.sep_hdr.configure(bg=border)
-                except Exception:
-                    pass
-                self._style.configure("Primary.TButton", background=acc, foreground="#ffffff", padding=btn_pad)
-                self._style.map("Primary.TButton", background=[("active", "#2f6fe9")])
-                self._style.configure("Danger.TButton", background="#f05252", foreground="#ffffff", padding=btn_pad)
-                self._style.map("Danger.TButton", background=[("active", "#ef4444")])
-                try:
-                    self._flatten_borders_recursive(self.root, bg)
-                except Exception:
-                    pass
-                # Ensure any open Toplevels inherit theme
-                try:
-                    for w in self.root.winfo_children():
-                        if isinstance(w, tk.Toplevel) or w.winfo_class() == 'Toplevel':
-                            self._apply_theme_to_toplevel(w)
-                except Exception:
-                    pass
-                try:
-                    self.txt_log.configure(bg="#ffffff", fg=fg, insertbackground=fg)
-                except Exception:
-                    pass
-                try:
-                    self.circ.set_color(acc)
-                except Exception:
-                    pass
-                # Canvas and menu backgrounds (light)
-                try:
-                    if hasattr(self, 'root_scroll') and hasattr(self.root_scroll, 'canvas'):
-                        self.root_scroll.canvas.configure(bg=bg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'adv_canvas'):
-                        self.adv_canvas.configure(bg=bg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'circ') and hasattr(self.circ, 'canvas'):
-                        self.circ.canvas.configure(bg=bg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'menubar'):
-                        self.menubar.configure(bg=panel, fg=fg, activebackground="#f0f0f0", activeforeground=fg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'header_menu'):
-                        self.header_menu.configure(bg=panel, fg=fg, activebackground="#f0f0f0", activeforeground=fg)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'tree_menu') and self.tree_menu is not None:
-                        self.tree_menu.configure(bg=panel, fg=fg, activebackground="#f0f0f0", activeforeground=fg)
-                except Exception:
-                    pass
-                # Menü varsayılanlarını light için de belirgin yap (beyaz kalmasın)
-                try:
-                    self.root.option_add("*Menu.background", panel)
-                    self.root.option_add("*Menu.foreground", fg)
-                    self.root.option_add("*Menu.activeBackground", "#e8f1ff")
-                    self.root.option_add("*Menu.activeForeground", fg)
-                    self.root.option_add("*Menu.relief", "flat")
-                    self.root.option_add("*Menu.borderWidth", 0)
-                    self.root.option_add("*Menu.font", "Segoe UI 9")
-                    if hasattr(self.root, "menu"):
-                        self.root.config(menu=self.root["menu"])
-                except Exception:
-                    pass
-                try:
-                    for card in (getattr(self, 'cards', []) or []):
-                        card.set_colors(fill="#ffffff", shadow="#e4e9f3")
-                    self._style.configure("CardInner.TFrame", background="#ffffff")
-                    try:
-                        if hasattr(self, 'toolbar'):
-                            self.toolbar.configure(bg="#ffffff")
-                    except Exception:
-                        pass
-                    self._style.configure("Card.TLabelframe", background="#ffffff", borderwidth=0, relief="flat")
-                    self._style.configure("Card.TLabelframe.Label", background="#ffffff", foreground=fg)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
     def _default_bs_theme(self) -> str:
         try:
             return "darkly" if bool(self.dark_mode_var.get()) else "flatly"
@@ -4087,135 +3206,6 @@ class TranslatorGUI:
                     self.root.config(menu=self.root["menu"])
                 except Exception:
                     pass
-        except Exception:
-            pass
-
-    def _apply_bootstrap_styles_impl(self) -> None:
-        if TBStyle is None:
-            return
-        try:
-            # Base backgrounds to current theme
-            try:
-                base_bg = self.root.cget("bg")
-                self._style.configure("TFrame", background=base_bg)
-                self._style.configure("TLabel", background=base_bg)
-            except Exception:
-                pass
-            # Buttons
-            if hasattr(self, 'tb_start'):
-                self.tb_start.configure(style='primary.TButton')
-            if hasattr(self, 'tb_start_sel'):
-                self.tb_start_sel.configure(style='primary.TButton')
-            if hasattr(self, 'tb_cancel'):
-                self.tb_cancel.configure(style='danger.TButton')
-            if hasattr(self, 'tb_add'):
-                self.tb_add.configure(style='info.TButton')
-            if hasattr(self, 'tb_remove_missing'):
-                self.tb_remove_missing.configure(style='warning.TButton')
-            if hasattr(self, 'tb_remove_selected'):
-                self.tb_remove_selected.configure(style='danger.TButton')
-            if hasattr(self, 'tb_preview'):
-                self.tb_preview.configure(style='secondary.TButton')
-            if hasattr(self, 'tb_toggle_adv'):
-                self.tb_toggle_adv.configure(style='secondary.TButton')
-            if hasattr(self, 'btn_browse'):
-                self.btn_browse.configure(style='secondary.TButton')
-            if hasattr(self, 'btn_open_out'):
-                self.btn_open_out.configure(style='link.TButton')
-            if hasattr(self, 'btn_pick_dict'):
-                self.btn_pick_dict.configure(style='secondary.TButton')
-            if hasattr(self, 'tb_open_selected_out'):
-                self.tb_open_selected_out.configure(style='link.TButton')
-            if hasattr(self, 'tb_open_selected_outdir'):
-                self.tb_open_selected_outdir.configure(style='link.TButton')
-            if hasattr(self, 'tb_reveal_src'):
-                self.tb_reveal_src.configure(style='link.TButton')
-            # Comboboxes
-            if hasattr(self, 'cmb_theme'):
-                self.cmb_theme.configure(style='info.TCombobox')
-            if hasattr(self, 'cmb_accent'):
-                self.cmb_accent.configure(style='secondary.TCombobox')
-            if hasattr(self, 'cmb_ui_quick'):
-                self.cmb_ui_quick.configure(style='info.TCombobox')
-            if hasattr(self, 'cmb_lang'):
-                self.cmb_lang.configure(style='info.TCombobox')
-            if hasattr(self, 'cmb_engine'):
-                self.cmb_engine.configure(style='secondary.TCombobox')
-            if hasattr(self, 'cmb_auto_priority'):
-                self.cmb_auto_priority.configure(style='secondary.TCombobox')
-            # Entries
-            if hasattr(self, 'ent_outdir_main'):
-                self.ent_outdir_main.configure(style='secondary.TEntry')
-            if hasattr(self, 'ent_filter'):
-                self.ent_filter.configure(style='secondary.TEntry')
-            # Checkbuttons (switch-like)
-            if hasattr(self, 'chk_compact'):
-                self.chk_compact.configure(style='success.TCheckbutton')
-            if hasattr(self, 'chk_dark'):
-                self.chk_dark.configure(style='info.TCheckbutton')
-            if hasattr(self, 'chk_parallel'):
-                self.chk_parallel.configure(style='success.TCheckbutton')
-            if hasattr(self, 'chk_save_next'):
-                self.chk_save_next.configure(style='secondary.TCheckbutton')
-            if hasattr(self, 'chk_clean'):
-                self.chk_clean.configure(style='warning.TCheckbutton')
-            # Frames / LabelFrames
-            if hasattr(self, 'toolbar'):
-                self.toolbar.configure(style='secondary.TFrame')
-            if hasattr(self, 'frm_files'):
-                self.frm_files.configure(style='secondary.TLabelframe')
-            if hasattr(self, 'frm_perf'):
-                self.frm_perf.configure(style='secondary.TLabelframe')
-            if hasattr(self, 'frm_adv'):
-                self.frm_adv.configure(style='secondary.TLabelframe')
-            if hasattr(self, 'frm_out'):
-                self.frm_out.configure(style='secondary.TLabelframe')
-            # Status bar label
-            if hasattr(self, 'status_bar'):
-                self.status_bar.configure(style='secondary.TLabel')
-            # Progressbar
-            if hasattr(self, 'pbar'):
-                try:
-                    self.pbar.configure(style='primary-striped.TProgressbar')
-                except Exception:
-                    self.pbar.configure(style='primary.TProgressbar')
-            # Rounded cards by context color (if available)
-            try:
-                for card, ctx in getattr(self, 'card_contexts', []):
-                    if self.dark_mode_var.get():
-                        if ctx == 'primary':
-                            card.set_colors(fill='#122235', shadow='#0b1623')
-                        elif ctx == 'info':
-                            card.set_colors(fill='#10232d', shadow='#0a1720')
-                        elif ctx == 'secondary':
-                            card.set_colors(fill='#151b26', shadow='#0a0f16')
-                        elif ctx == 'warning':
-                            card.set_colors(fill='#3a2f12', shadow='#1f1809')
-                        else:
-                            card.set_colors(fill='#151b26', shadow='#0a0f16')
-                    else:
-                        if ctx == 'primary':
-                            card.set_colors(fill='#eaf2ff', shadow='#d4def1')
-                        elif ctx == 'info':
-                            card.set_colors(fill='#e9fbff', shadow='#d5eef3')
-                        elif ctx == 'secondary':
-                            card.set_colors(fill='#ffffff', shadow='#e4e9f3')
-                        elif ctx == 'warning':
-                            card.set_colors(fill='#fff7e6', shadow='#f0e7cf')
-                        else:
-                            card.set_colors(fill='#ffffff', shadow='#e4e9f3')
-            except Exception:
-                pass
-            # Notebook tab styling
-            try:
-                s = ttk.Style()
-                s.configure('TNotebook.Tab', padding=(14, 8))
-                if bool(self.dark_mode_var.get()):
-                    s.map('TNotebook.Tab', background=[('selected', '#163a5f')], foreground=[('selected', '#ffffff')])
-                else:
-                    s.map('TNotebook.Tab', background=[('selected', '#e8f1ff')], foreground=[('selected', '#1f2329')])
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -4237,493 +3227,248 @@ class TranslatorGUI:
         except Exception:
             pass
 
-    def _ensure_ui_font_family(self) -> None:
-        try:
-            code = (self.ui_lang_code or "en").lower()
-            avail = set()
-            try:
-                avail = set(tkfont.families())
-            except Exception:
-                avail = set()
-            def pick(candidates):
-                for fam in candidates:
-                    if fam in avail:
-                        return fam
-                return None
-            chosen = None
-            if code.startswith("zh"):
-                chosen = pick(["Microsoft YaHei", "SimSun", "Noto Sans SC", "Arial Unicode MS", "DejaVu Sans", "Segoe UI"])
-            elif code.startswith("ja"):
-                chosen = pick(["Meiryo", "Yu Gothic", "Noto Sans JP", "Arial Unicode MS", "DejaVu Sans", "Segoe UI"])
-            elif code.startswith("ko"):
-                chosen = pick(["Malgun Gothic", "Noto Sans KR", "Arial Unicode MS", "DejaVu Sans", "Segoe UI"])
-            elif code.startswith("ar"):
-                chosen = pick(["Segoe UI", "Tahoma", "Arial", "DejaVu Sans"])
-            else:
-                chosen = pick(["Segoe UI", "Arial", "DejaVu Sans"]) or "Segoe UI"
-            if not chosen:
-                return
-            for name, fnt in self._base_fonts.items():
-                try:
-                    fnt.configure(family=chosen)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    def _apply_font_scale(self) -> None:
-        try:
-            scale = float(self.font_scale_var.get() or 1.0)
-            for name, fnt in self._base_fonts.items():
-                try:
-                    base_size = self._base_font_sizes.get(name)
-                    if isinstance(base_size, int):
-                        new_size = max(8, int(round(base_size * scale)))
-                        fnt.configure(size=new_size)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    def _build_section_header(self, parent, title: str, ctx: str = "secondary") -> ttk.Label:
-        try:
-            row = ttk.Frame(parent)
-            row.pack(fill="x", padx=10, pady=(8, 6))
-            if not hasattr(self, "_section_font"):
-                base = tkfont.nametofont("TkDefaultFont").actual()
-                size = int(base.get("size", 9))
-                size = size + 1 if size > 0 else size - 1  # negative = pixels in Tk
-                self._section_font = tkfont.Font(family=base.get("family"), size=size, weight="bold")
-            lbl = ttk.Label(row, text=title, font=self._section_font)
-            lbl.pack(side="left")
-            # Style hint via context color using bootstrap cards mapping
-            if TBStyle is not None:
-                if ctx == 'primary':
-                    lbl.configure(style='primary.TLabel')
-                elif ctx == 'info':
-                    lbl.configure(style='info.TLabel')
-                elif ctx == 'warning':
-                    lbl.configure(style='warning.TLabel')
-                else:
-                    lbl.configure(style='secondary.TLabel')
-            return lbl
-        except Exception:
-            return ttk.Label(parent, text=title)
-
     # ---------- Output helpers ----------
     def _choose_outdir(self) -> None:
-        path = filedialog.askdirectory(title="Select output directory")
+        path = filedialog.askdirectory(title=self._tr("Select output directory"))
         if path:
             self.outdir_var.set(path)
 
-    def _open_output_dialog(self) -> None:
-        # Open output settings in a separate resizable window at ~60% of root size
+    # ---------- Dialogs ----------
+    APP_VERSION = "0.2.0"
+    REPO_URL = "https://github.com/noms6/subtitle-pro"
+
+    def _make_dialog(self, title: str, width: int, height: int, modal: bool = False):
+        """Common themed dialog: centred over the main window, native frame, consistent padding."""
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.title(title)
         try:
-            win = tk.Toplevel(self.root)
-            try:
-                if TBStyle is not None and getattr(self, '_bs', None) is not None:
-                    self._bs.style.master = win  # type: ignore[attr-defined]
-                self._apply_theme()
-            except Exception:
-                pass
-            win.title(self._tr("Output"))
-            try:
-                self._apply_theme_to_toplevel(win)
-            except Exception:
-                pass
-            rw = max(self.root.winfo_width(), 800)
-            rh = max(self.root.winfo_height(), 560)
-            win.geometry(f"{int(rw*0.6)}x{int(rh*0.6)}")
-            win.resizable(True, True)
-            frm = ttk.Frame(win)
-            frm.pack(fill="both", expand=True, padx=12, pady=12)
-            # Reuse existing output controls by cloning their variables
-            out_frame = ttk.LabelFrame(frm, text=self._tr("Output"), style="Card.TLabelframe")
-            out_frame.pack(fill="both", expand=True)
-            row1 = ttk.Frame(out_frame)
-            row1.pack(fill="x", pady=6)
-            c1 = ttk.Checkbutton(row1, text=self._tr("Save next to source"), variable=self.save_next_var)
-            try:
-                if TBStyle is not None:
-                    c1.configure(style='success.TCheckbutton')
-            except Exception:
-                pass
-            c1.pack(side="left")
-            row2 = ttk.Frame(out_frame)
-            row2.pack(fill="x", pady=6)
-            ttk.Label(row2, text=self._tr("Output directory:")).pack(side="left")
-            ent = ttk.Entry(row2, textvariable=self.outdir_var)
-            try:
-                if TBStyle is not None:
-                    ent.configure(style='secondary.TEntry')
-            except Exception:
-                pass
-            ent.pack(side="left", fill="x", expand=True, padx=8)
-            b1 = ttk.Button(row2, text=self._tr("Browse"), command=self._choose_outdir)
-            b2 = ttk.Button(row2, text=self._tr("Open output folder"), command=self._open_outdir)
-            try:
-                if TBStyle is not None:
-                    b1.configure(style='secondary.TButton')
-                    b2.configure(style='link.TButton')
-            except Exception:
-                pass
-            b1.pack(side="left")
-            b2.pack(side="left", padx=6)
-            row3 = ttk.Frame(out_frame)
-            row3.pack(fill="x", pady=6)
-            c2 = ttk.Checkbutton(row3, text=self._tr("Remove [bracketed] notes from SRT after translate"), variable=self.clean_after_var)
-            try:
-                if TBStyle is not None:
-                    c2.configure(style='warning.TCheckbutton')
-            except Exception:
-                pass
-            c2.pack(side="left")
-            okb = ttk.Button(frm, text="OK", command=win.destroy)
-            try:
-                if TBStyle is not None:
-                    okb.configure(style='primary.TButton')
-            except Exception:
-                pass
-            okb.pack(side="right", pady=8)
+            win.iconphoto(False, self._app_icon)
         except Exception:
             pass
+        win.transient(self.root)
+        self._apply_theme_to_toplevel(win)
+        self.root.update_idletasks()
+        rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+        rw, rh = max(self.root.winfo_width(), width), max(self.root.winfo_height(), height)
+        win.geometry(f"{width}x{height}+{rx + (rw - width) // 2}+{ry + max(40, (rh - height) // 3)}")
+        win.minsize(min(width, 520), min(height, 360))
+        body = ttk.Frame(win)
+        body.pack(fill="both", expand=True, padx=18, pady=(16, 8))
+        footer = ttk.Frame(win)
+        footer.pack(fill="x", padx=18, pady=(0, 16))
+        win.deiconify()
+        if modal:
+            win.grab_set()
+        win.bind("<Escape>", lambda e: win.destroy())
+        return win, body, footer
+
+    def _labeled(self, parent, label: str, hint: str = "", grid=None):
+        """Form field: muted label (with an ⓘ tooltip for the hint) above the control.
+        Returns the row frame the control goes into. grid=(row, col) places it in a 2-column form."""
+        box = ttk.Frame(parent)
+        if grid is None:
+            box.pack(fill="x", pady=(0, 14))
+        else:
+            box.grid(row=grid[0], column=grid[1], sticky="ew", padx=(0, 18) if grid[1] == 0 else 0, pady=(0, 14))
+        head = ttk.Frame(box)
+        head.pack(fill="x")
+        ttk.Label(head, text=self._tr(label), style="Muted.TLabel").pack(side="left")
+        if hint:
+            info = ttk.Label(head, text=" ⓘ", style="Muted.TLabel", cursor="question_arrow")
+            info.pack(side="left")
+            _Tooltip(info, self._tr(hint), delay_ms=150)
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=(4, 0))
+        return row
+
+    def _keyed_combo(self, parent, var, items, width=22):
+        """Combobox showing translated labels for internal keys (no more raw 'google_first' / 'pre')."""
+        cb = ttk.Combobox(parent, state="readonly", width=width, values=[self._tr(lbl) for _k, lbl in items])
+        keys = [k for k, _l in items]
+        try:
+            cb.current(keys.index(var.get()))
+        except ValueError:
+            cb.current(0)
+        cb.bind("<<ComboboxSelected>>", lambda e: (var.set(keys[cb.current()]), self._save_settings()))
+        return cb
+
+    def _open_settings(self, tab: str = "appearance") -> None:
+        """One settings window (was three overlapping ones: Output, Preferences, a full-screen Advanced)."""
+        win, body, footer = self._make_dialog(self._tr("Settings"), 700, 520)
+        nb = ttk.Notebook(body)
+        nb.pack(fill="both", expand=True)
+        tabs = {}
+        for key, label in (("appearance", "Appearance"), ("translation", "Translation"), ("output", "Output"),
+                           ("dictionary", "Dictionary")):
+            f = ttk.Frame(nb)
+            nb.add(f, text=self._tr(label))
+            inner = ttk.Frame(f)
+            inner.pack(fill="both", expand=True, padx=16, pady=16)
+            tabs[key] = inner
+
+        # Appearance
+        t = tabs["appearance"]
+        row = self._labeled(t, "Theme:")
+        theme_cb = self._keyed_combo(row, self.theme_var, [("light", "Light mode"), ("dark", "Dark mode")], 18)
+        theme_cb.bind("<<ComboboxSelected>>", lambda e: (self.theme_var.set(["light", "dark"][theme_cb.current()]),
+                                                          self.dark_mode_var.set(theme_cb.current() == 1),
+                                                          self._apply_theme(), self._sync_header_combos(),
+                                                          self._apply_theme_to_toplevel(win), self._save_settings()), add="+")
+        theme_cb.pack(side="left")
+        row = self._labeled(t, "Accent color:")
+        acc_cb = self._keyed_combo(row, self.accent_var, [(a, a.capitalize()) for a in self.ACCENTS], 18)
+        acc_cb.bind("<<ComboboxSelected>>", lambda e: (self._apply_theme(), self._sync_header_combos()), add="+")
+        acc_cb.pack(side="left")
+        row = self._labeled(t, "Font size")
+        scales = [0.9, 1.0, 1.1, 1.2, 1.3]
+        fs = ttk.Combobox(row, state="readonly", width=18, values=[f"{int(x * 100)}%" for x in scales])
+        cur = min(scales, key=lambda x: abs(x - float(self.font_scale_var.get() or 1.0)))
+        fs.current(scales.index(cur))
+        fs.bind("<<ComboboxSelected>>", lambda e: (self.font_scale_var.set(scales[fs.current()]), self._apply_font_scale(), self._save_settings()))
+        fs.pack(side="left")
+        ttk.Checkbutton(t, text=self._tr("Compact mode"), variable=self.compact_mode_var,
+                        command=lambda: (self._apply_theme(), self._save_settings())).pack(anchor="w")
+
+        # Translation
+        t = tabs["translation"]
+        form = ttk.Frame(t)
+        form.pack(fill="x")
+        form.columnconfigure(0, weight=1, uniform="f")
+        form.columnconfigure(1, weight=1, uniform="f")
+        row = self._labeled(form, "Engine:", "Engine selection: auto/google/mymemory.", grid=(0, 0))
+        self._keyed_combo(row, self.engine_var, [("auto", "Auto"), ("google", "Google"), ("mymemory", "MyMemory"),
+                                                 ("deepl", "DeepL"), ("deepl_web", "DeepL (Web)"), ("libre", "Libre")]).pack(fill="x")
+        row = self._labeled(form, "Auto priority:", "Auto priority decides which engine is tried first in auto mode.", grid=(0, 1))
+        self._keyed_combo(row, self.auto_priority_var, [("google_first", "Google first"), ("mymemory_first", "MyMemory first")]).pack(fill="x")
+        row = self._labeled(form, "Batch size (Google batch):", "Batch: how many unique lines are sent to Google at once.", grid=(1, 0))
+        ttk.Spinbox(row, from_=10, to=500, textvariable=self.batch_size_var, width=8).pack(side="left")
+        row = self._labeled(form, "Fallback concurrent jobs (MyMemory):", "MyMemory concurrent jobs: number of lines translated in parallel (fallback).", grid=(1, 1))
+        ttk.Spinbox(row, from_=1, to=16, textvariable=self.mm_workers_var, width=8).pack(side="left")
+        prow = ttk.Frame(t)
+        prow.pack(fill="x", pady=(0, 12))
+        ttk.Checkbutton(prow, text=self._tr("Translate files in parallel"), variable=self.parallel_files_var).pack(side="left")
+        ttk.Label(prow, text=self._tr("Workers:"), style="Muted.TLabel").pack(side="left", padx=(16, 6))
+        ttk.Spinbox(prow, from_=1, to=4, textvariable=self.file_workers_var, width=5).pack(side="left")
+        ttk.Checkbutton(t, text=self._tr("Skip files that are already in the target language"), variable=self.skip_same_lang_var).pack(anchor="w")
+
+        # Output
+        t = tabs["output"]
+        ttk.Checkbutton(t, text=self._tr("Save next to source"), variable=self.save_next_var).pack(anchor="w", pady=(0, 12))
+        row = self._labeled(t, "Output directory:")
+        ttk.Entry(row, textvariable=self.outdir_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text=self._tr("Browse"), command=self._choose_outdir).pack(side="left", padx=(6, 0))
+        row = self._labeled(t, "PDF output as:")
+        ttk.Radiobutton(row, text="PDF", value="pdf", variable=self.pdf_mode_var).pack(side="left")
+        ttk.Radiobutton(row, text="TXT", value="txt", variable=self.pdf_mode_var).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(t, text=self._tr("Remove [bracketed] notes from SRT after translate"), variable=self.clean_after_var).pack(anchor="w")
+
+        # Dictionary
+        t = tabs["dictionary"]
+        row = self._labeled(t, "Custom dictionary:", "Dictionary mode: off/pre/post/both.")
+        self._keyed_combo(row, self.dict_mode_var, [("off", "Off"), ("pre", "Before translation"), ("post", "After translation"),
+                                                    ("both", "Both")], 20).pack(side="left")
+        row = self._labeled(t, "File")
+        ttk.Entry(row, textvariable=self.dict_path_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text=self._tr("Browse"), command=self._choose_dict).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(t, text=self._tr("Case-insensitive terms"), variable=self.dict_case_ins_var).pack(anchor="w", pady=(0, 6))
+        ttk.Checkbutton(t, text=self._tr("Word-boundary only"), variable=self.dict_word_boundary_var).pack(anchor="w")
+
+        nb.select(list(tabs).index(tab) if tab in tabs else 0)
+
+        def close():
+            self._save_settings()
+            self._refresh_status_bar()
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", close)
+        ttk.Button(footer, text=self._tr("Close"), command=close, style="Accent.TButton").pack(side="right")
+        self._settings_win = win
+
+    # old entry points (header menu / gear button / shortcuts) open the right tab
+    def _open_output_dialog(self) -> None:
+        self._open_settings("output")
 
     def _open_preferences(self) -> None:
-        try:
-            win = tk.Toplevel(self.root)
-            try:
-                if TBStyle is not None and getattr(self, '_bs', None) is not None:
-                    self._bs.style.master = win  # type: ignore[attr-defined]
-                self._apply_theme()
-            except Exception:
-                pass
-            win.title(self._tr("Preferences..."))
-            try:
-                self._apply_theme_to_toplevel(win)
-            except Exception:
-                pass
-            rw = max(self.root.winfo_width(), 820)
-            rh = max(self.root.winfo_height(), 600)
-            win.geometry(f"{int(rw*0.55)}x{int(rh*0.55)}")
-            win.resizable(True, True)
-            frm = ttk.Frame(win, style="TFrame")
-            frm.pack(fill="both", expand=True, padx=16, pady=16)
-            # Theme row
-            r1 = ttk.Frame(frm); r1.pack(fill="x", pady=6)
-            ttk.Label(r1, text=self._tr("Dark theme")).pack(side="left")
-            c_dark = ttk.Checkbutton(r1, variable=self.dark_mode_var, command=lambda: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
-            try:
-                if TBStyle is not None:
-                    c_dark.configure(style='info.TCheckbutton')
-            except Exception:
-                pass
-            c_dark.pack(side="left", padx=6)
-            ttk.Label(r1, text=self._tr("Compact mode")).pack(side="left", padx=(16,0))
-            c_comp = ttk.Checkbutton(r1, variable=self.compact_mode_var, command=lambda: (self._apply_theme(), self._refresh_menu_bar(), self._save_settings()))
-            try:
-                if TBStyle is not None:
-                    c_comp.configure(style='success.TCheckbutton')
-            except Exception:
-                pass
-            c_comp.pack(side="left", padx=6)
-            # Accent
-            r2 = ttk.Frame(frm); r2.pack(fill="x", pady=6)
-            ttk.Label(r2, text=self._tr("Accent color:")).pack(side="left")
-            cb_acc = ttk.Combobox(r2, state="readonly", values=["blue","purple","green","orange","pink","teal"], textvariable=self.accent_var, width=12)
-            try:
-                if TBStyle is not None:
-                    cb_acc.configure(style='secondary.TCombobox')
-            except Exception:
-                pass
-            cb_acc.pack(side="left", padx=6)
-            # Theme profile
-            r2b = ttk.Frame(frm); r2b.pack(fill="x", pady=6)
-            ttk.Label(r2b, text=self._tr("Theme profile:")).pack(side="left")
-            profiles = ["", "Soft Blue (Light)", "Soft Purple (Dark)", "Midnight Teal (Dark)"]
-            cb_prof = ttk.Combobox(r2b, state="readonly", values=profiles, textvariable=self.theme_profile_var, width=22)
-            try:
-                if TBStyle is not None:
-                    cb_prof.configure(style='secondary.TCombobox')
-            except Exception:
-                pass
-            cb_prof.pack(side="left", padx=6)
-            # Bootstrap theme
-            if TBStyle is not None:
-                r3 = ttk.Frame(frm); r3.pack(fill="x", pady=6)
-                ttk.Label(r3, text=self._tr("Bootstrap theme")).pack(side="left")
-                themes = ["flatly","darkly","cosmo","cyborg","journal","litera","lumen","minty","pulse","sandstone","simplex","solar","superhero","united","yeti"]
-                cb_bs = ttk.Combobox(r3, state="readonly", values=themes, textvariable=self.bs_theme_var, width=18)
-                try:
-                    cb_bs.configure(style='info.TCombobox')
-                except Exception:
-                    pass
-                cb_bs.pack(side="left", padx=6)
-            # Font scale
-            r4 = ttk.Frame(frm); r4.pack(fill="x", pady=6)
-            ttk.Label(r4, text=self._tr("Font size")).pack(side="left")
-            fs = ttk.Combobox(r4, state="readonly", values=["90%","100%","110%","120%","130%"], width=10)
-            try:
-                if TBStyle is not None:
-                    fs.configure(style='secondary.TCombobox')
-            except Exception:
-                pass
-            fs.pack(side="left", padx=6)
-            def _apply_prefs():
-                try:
-                    v = fs.get().replace('%','')
-                    if v:
-                        self.font_scale_var.set(float(v)/100.0)
-                except Exception:
-                    pass
-                # Apply theme profile
-                try:
-                    prof = (self.theme_profile_var.get() or "").strip()
-                    if prof == "Soft Blue (Light)":
-                        self.dark_mode_var.set(False)
-                        self.accent_var.set("blue")
-                    elif prof == "Soft Purple (Dark)":
-                        self.dark_mode_var.set(True)
-                        self.accent_var.set("purple")
-                    elif prof == "Midnight Teal (Dark)":
-                        self.dark_mode_var.set(True)
-                        self.accent_var.set("teal")
-                except Exception:
-                    pass
-                self._apply_font_scale()
-                self._apply_theme()
-                try:
-                    self._refresh_menu_bar()
-                except Exception:
-                    pass
-                self._apply_bootstrap_styles()
-                self._save_settings()
-            btn_apply = ttk.Button(frm, text=self._tr("Apply"), command=_apply_prefs)
-            btn_close = ttk.Button(frm, text=self._tr("Close"), command=win.destroy)
-            try:
-                if TBStyle is not None:
-                    btn_apply.configure(style='primary.TButton')
-                    btn_close.configure(style='secondary.TButton')
-            except Exception:
-                pass
-            btn_apply.pack(side="right")
-            btn_close.pack(side="right", padx=(0,8))
-        except Exception:
-            pass
-
-    def _toggle_advanced(self) -> None:
-        # Forward to advanced dialog
-        self._open_advanced_dialog()
+        self._open_settings("appearance")
 
     def _open_advanced_dialog(self) -> None:
+        self._open_settings("translation")
+
+    def _toggle_advanced(self) -> None:
+        self._open_settings("translation")
+
+    def _preview_selected(self) -> None:
+        """First lines of the selected file. Offline language guess (the old version made a
+        Google request on the UI thread and always reported 'auto')."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        path = self.item_to_path.get(sel[0])
+        if not path or not os.path.isfile(path):
+            return
+        ext = os.path.splitext(path)[1].lower()
         try:
-            win = tk.Toplevel(self.root)
-            try:
-                if TBStyle is not None and getattr(self, '_bs', None) is not None:
-                    self._bs.style.master = win  # type: ignore[attr-defined]
-                self._apply_theme()
-            except Exception:
-                pass
-            win.title(self._tr("Advanced Settings"))
-            try:
-                self._apply_theme_to_toplevel(win)
-            except Exception:
-                pass
-            # Open maximized when possible; otherwise cover the screen
-            try:
-                win.state("zoomed")
-            except Exception:
-                sw = win.winfo_screenwidth(); sh = win.winfo_screenheight()
-                win.geometry(f"{sw}x{sh}+0+0")
-            win.minsize(960, 640)
-            win.resizable(True, True)
-            container = ttk.Frame(win)
-            container.pack(fill="both", expand=True)
-            cvs = tk.Canvas(container, highlightthickness=0, bd=0)
-            vbar = ttk.Scrollbar(container, orient="vertical", command=cvs.yview, style="Modern.Vertical.TScrollbar")
-            cvs.configure(yscrollcommand=vbar.set)
-            cvs.pack(side="left", fill="both", expand=True)
-            vbar.pack(side="right", fill="y")
-            inner = ttk.Frame(cvs)
-            inner_id = cvs.create_window((0, 0), window=inner, anchor="nw")
-            # Force dark backgrounds for advanced dialog if dark mode
-            try:
-                bg = self._bs.colors.bg if getattr(self, '_bs', None) is not None else (self.root.cget('bg'))
-                win.configure(bg=bg)
-                try:
-                    container.configure(style="TFrame")
-                except Exception:
-                    pass
-                try:
-                    cvs.configure(bg=bg)
-                except Exception:
-                    pass
-                try:
-                    inner.configure(style="TFrame")
-                except Exception:
-                    try:
-                        inner.configure(bg=bg)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            def _on_inner_config(event=None):
-                try:
-                    cvs.configure(scrollregion=cvs.bbox("all"))
-                    # Make content width follow canvas width for responsive layout
-                    cw = cvs.winfo_width()
-                    if cw > 0:
-                        cvs.itemconfigure(inner_id, width=cw)
-                except Exception:
-                    pass
-            def _on_canvas_config(event=None):
-                try:
-                    cw = cvs.winfo_width()
-                    if cw > 0:
-                        cvs.itemconfigure(inner_id, width=cw)
-                except Exception:
-                    pass
-            inner.bind("<Configure>", _on_inner_config)
-            cvs.bind("<Configure>", _on_canvas_config)
+            if ext in (".srt", ".vtt", ".txt", ".md", ".csv"):
+                sample = "".join(_read_lines_robust(path)[:40])
+            elif ext == ".docx" and DocxDocument:
+                sample = "\n".join(p.text for p in DocxDocument(path).paragraphs[:40])
+            elif ext == ".pdf" and pdf_extract_text:
+                sample = "\n".join((pdf_extract_text(path) or "").splitlines()[:40])
+            else:
+                sample = ""
+        except Exception as e:
+            sample = f"{self._tr('Error')}: {e}"
+        text_only = "\n".join(l for l in sample.splitlines() if l.strip() and not is_timestamp(l) and not is_sequence_number(l))
+        lang = detect_language(text_only[:2000]) or "?"
+        win, body, footer = self._make_dialog(f"{self._tr('Preview')} — {os.path.basename(path)}", 760, 520)
+        meta = ttk.Frame(body)
+        meta.pack(fill="x", pady=(0, 10))
+        ttk.Label(meta, text=os.path.basename(path), style="Section.TLabel").pack(side="left")
+        lang_name = _localize_lang_name(lang, self.ui_lang_code) if lang != "?" else "?"
+        ttk.Label(meta, text=f"{self._tr('Lang:')} {lang_name}   ·   {self._fmt_size(os.path.getsize(path))}",
+                  style="Muted.TLabel").pack(side="right")
+        wrap = ttk.Frame(body, style="Field.TFrame")
+        wrap.pack(fill="both", expand=True)
+        txt = tk.Text(wrap, wrap="word", bd=0, highlightthickness=0, padx=12, pady=10)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview, style="Modern.Vertical.TScrollbar")
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.insert("1.0", sample)
+        txt.configure(state="disabled", font=self._fonts["mono"])
+        self._apply_theme_to_toplevel(win)
+        ttk.Button(footer, text=self._tr("Close"), command=win.destroy, style="Accent.TButton").pack(side="right")
 
-            # Tabs for advanced settings
-            nb = ttk.Notebook(inner)
-            nb.pack(fill="both", expand=True, padx=12, pady=8)
-            tab_general = ttk.Frame(nb)
-            tab_engine = ttk.Frame(nb)
-            tab_dict = ttk.Frame(nb)
-            tab_perf = ttk.Frame(nb)
-            nb.add(tab_general, text="🧰 " + self._tr("General"))
-            nb.add(tab_engine, text="⚙️ " + self._tr("Engine"))
-            nb.add(tab_dict, text="📖 " + self._tr("Dictionary"))
-            nb.add(tab_perf, text="🚀 " + self._tr("Performance"))
-
-            # General (batch/mm)
-            sec1 = ttk.LabelFrame(tab_general, text=self._tr("General"), style="Card.TLabelframe")
-            sec1.pack(fill="x", padx=6, pady=6)
-            r1 = ttk.Frame(sec1); r1.pack(fill="x", pady=4)
-            Spinbox = getattr(ttk, "Spinbox", tk.Spinbox)
-            ttk.Label(r1, text=self._tr("Batch size (Google batch):")).pack(side="left")
-            ttk.Label(r1, text=" ?", foreground="#888").pack(side="left")
-            r1_tip = self._tr("Batch: how many unique lines are sent to Google at once.")
-            r1_tip_label = ttk.Label(sec1)
-            def _enter_r1(e): r1_tip_label.configure(text=r1_tip)
-            def _leave_r1(e): r1_tip_label.configure(text="")
-            r1.bind("<Enter>", _enter_r1); r1.bind("<Leave>", _leave_r1)
-            sp1 = Spinbox(r1, from_=10, to=500, textvariable=self.batch_size_var, width=8)
-            sp1.pack(side="left", padx=8)
-            r2 = ttk.Frame(sec1); r2.pack(fill="x", pady=4)
-            ttk.Label(r2, text=self._tr("Fallback concurrent jobs (MyMemory):")).pack(side="left")
-            ttk.Label(r2, text=" ?", foreground="#888").pack(side="left")
-            r2_tip = self._tr("MyMemory concurrent jobs: number of lines translated in parallel (fallback).")
-            r2_tip_label = ttk.Label(sec1)
-            def _enter_r2(e): r2_tip_label.configure(text=r2_tip)
-            def _leave_r2(e): r2_tip_label.configure(text="")
-            r2.bind("<Enter>", _enter_r2); r2.bind("<Leave>", _leave_r2)
-            r1_tip_label.pack(fill="x")
-            r2_tip_label.pack(fill="x")
-            sp2 = Spinbox(r2, from_=1, to=16, textvariable=self.mm_workers_var, width=8)
-            sp2.pack(side="left", padx=8)
-
-            # Engine
-            sec2 = ttk.LabelFrame(tab_engine, text=self._tr("Engine:"), style="Card.TLabelframe")
-            sec2.pack(fill="x", padx=6, pady=6)
-            r3 = ttk.Frame(sec2); r3.pack(fill="x", pady=4)
-            ttk.Label(r3, text=self._tr("Engine:")).pack(side="left")
-            ttk.Label(r3, text=" ?", foreground="#888").pack(side="left")
-            cb_engine = ttk.Combobox(r3, values=["auto", "google", "mymemory", "deepl", "deepl_web", "libre"], textvariable=self.engine_var, state="readonly", width=12)
-            try:
-                if TBStyle is not None:
-                    cb_engine.configure(style='secondary.TCombobox')
-            except Exception:
-                pass
-            cb_engine.pack(side="left", padx=8)
-            ttk.Label(r3, text=self._tr("Auto priority:")).pack(side="left", padx=(12, 4))
-            ttk.Label(r3, text=" ?", foreground="#888").pack(side="left")
-            cb_ap = ttk.Combobox(r3, values=["google_first", "mymemory_first"], textvariable=self.auto_priority_var, state="readonly", width=16)
-            try:
-                if TBStyle is not None:
-                    cb_ap.configure(style='secondary.TCombobox')
-            except Exception:
-                pass
-            cb_ap.pack(side="left")
-            # tips
-            r3_tip1 = self._tr("Engine selection: auto/google/mymemory.")
-            r3_tip2 = self._tr("Auto priority decides which engine is tried first in auto mode.")
-            r3_tip = ttk.Label(sec2)
-            def _enter_r3(e): r3_tip.configure(text=r3_tip1 + "  " + r3_tip2)
-            def _leave_r3(e): r3_tip.configure(text="")
-            r3.bind("<Enter>", _enter_r3); r3.bind("<Leave>", _leave_r3)
-            r3_tip.pack(fill="x")
-
-            # Dictionary
-            sec3 = ttk.LabelFrame(tab_dict, text=self._tr("Custom dictionary:"), style="Card.TLabelframe")
-            sec3.pack(fill="x", padx=6, pady=6)
-            rd1 = ttk.Frame(sec3); rd1.pack(fill="x", pady=4)
-            cb_dm = ttk.Combobox(rd1, values=["off", "pre", "post", "both"], textvariable=self.dict_mode_var, state="readonly", width=8)
-            try:
-                if TBStyle is not None:
-                    cb_dm.configure(style='secondary.TCombobox')
-            except Exception:
-                pass
-            cb_dm.pack(side="left", padx=6)
-            ttk.Label(rd1, text=" ?", foreground="#888").pack(side="left")
-            ent_dp = ttk.Entry(rd1, textvariable=self.dict_path_var)
-            try:
-                if TBStyle is not None:
-                    ent_dp.configure(style='secondary.TEntry')
-            except Exception:
-                pass
-            ent_dp.pack(side="left", fill="x", expand=True, padx=6)
-            btn_dp = ttk.Button(rd1, text=self._tr("Browse"), command=self._choose_dict)
-            try:
-                if TBStyle is not None:
-                    btn_dp.configure(style='secondary.TButton')
-            except Exception:
-                pass
-            btn_dp.pack(side="left")
-            rd1_tip = self._tr("Dictionary mode: off/pre/post/both.")
-            rd1_tip_label = ttk.Label(sec3)
-            def _enter_rd1(e): rd1_tip_label.configure(text=rd1_tip)
-            def _leave_rd1(e): rd1_tip_label.configure(text="")
-            rd1.bind("<Enter>", _enter_rd1); rd1.bind("<Leave>", _leave_rd1)
-            rd2 = ttk.Frame(sec3); rd2.pack(fill="x", pady=4)
-            ttk.Checkbutton(rd2, text=self._tr("Case-insensitive terms"), variable=self.dict_case_ins_var).pack(side="left")
-            ttk.Label(rd2, text=" ?", foreground="#888").pack(side="left")
-            ttk.Checkbutton(rd2, text=self._tr("Word-boundary only"), variable=self.dict_word_boundary_var).pack(side="left", padx=10)
-            ttk.Label(rd2, text=" ?", foreground="#888").pack(side="left")
-            rd2_tip = ttk.Label(sec3)
-            def _enter_rd2(e): rd2_tip.configure(text=self._tr("Case-insensitive matching."))
-            def _leave_rd2(e): rd2_tip.configure(text="")
-            rd2.bind("<Enter>", _enter_rd2); rd2.bind("<Leave>", _leave_rd2)
-            rd2_tip.pack(fill="x")
-
-            # Appearance & performance
-            sec4 = ttk.LabelFrame(tab_perf, text=self._tr("Appearance & Performance"), style="Card.TLabelframe")
-            sec4.pack(fill="x", padx=6, pady=6)
-            ttk.Checkbutton(sec4, text=self._tr("Dark theme"), variable=self.dark_mode_var, command=self._apply_theme).pack(anchor="w", pady=2)
-            rp = ttk.Frame(sec4); rp.pack(fill="x", pady=4)
-            ttk.Checkbutton(rp, text=self._tr("Translate files in parallel"), variable=self.parallel_files_var).pack(side="left")
-            ttk.Label(rp, text=" ?", foreground="#888").pack(side="left")
-            ttk.Label(rp, text=self._tr("Workers:")).pack(side="left", padx=(10, 0))
-            rp_tip = ttk.Label(sec4)
-            def _enter_rp(e): rp_tip.configure(text=self._tr("Translate multiple files concurrently.") + "  " + self._tr("Number of concurrent files."))
-            def _leave_rp(e): rp_tip.configure(text="")
-            rp.bind("<Enter>", _enter_rp); rp.bind("<Leave>", _leave_rp)
-            rp_tip.pack(fill="x")
-            Spinbox(rp, from_=1, to=4, textvariable=self.file_workers_var, width=5).pack(side="left", padx=8)
-
-            ok_adv = ttk.Button(win, text="OK", command=win.destroy)
-            try:
-                if TBStyle is not None:
-                    ok_adv.configure(style='primary.TButton')
-            except Exception:
-                pass
-            ok_adv.pack(side="right", padx=12, pady=10)
-        except Exception:
-            pass
+    def _show_about(self) -> None:
+        win, body, footer = self._make_dialog(self._tr("About"), 560, 400)
+        top = ttk.Frame(body)
+        top.pack(fill="x")
+        if getattr(self, "_logo_img", None) is not None:
+            self._about_logo = self._app_icon.subsample(max(1, self._app_icon.width() // 56))
+            ttk.Label(top, image=self._about_logo).pack(side="left", padx=(0, 14))
+        names = ttk.Frame(top)
+        names.pack(side="left", fill="x")
+        ttk.Label(names, text="Subtitle PRO", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(names, text=f"{self._tr('Version:')} {self.APP_VERSION}  ·  MIT", style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(body, text=self._tr("Batch subtitle & document translator"), wraplength=500).pack(anchor="w", pady=(16, 8))
+        feats = [self._tr("Multi-format: SRT, VTT, TXT, MD, CSV, DOCX, PDF"),
+                 self._tr("Engines: Auto / Google / MyMemory with fallback"),
+                 self._tr("Dictionary pre/post apply, case/word-boundary options"),
+                 self._tr("Queue, preview, drag&drop, logging, error policy"),
+                 self._tr("Persistent settings, themes, accent & compact mode")]
+        for f in feats:
+            ttk.Label(body, text="•  " + f.lstrip("- "), style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=1)
+        link_row = ttk.Frame(body)
+        link_row.pack(fill="x", pady=(16, 0))
+        ttk.Label(link_row, text=self._tr("Project site:"), style="Muted.TLabel").pack(side="left")
+        link = ttk.Label(link_row, text=self.REPO_URL.replace("https://", ""), cursor="hand2",
+                         foreground=self._palette["accent"])
+        link.pack(side="left", padx=(6, 0))
+        link.bind("<Button-1>", lambda e: __import__("webbrowser").open(self.REPO_URL))
+        ttk.Button(footer, text=self._tr("Close"), command=win.destroy, style="Accent.TButton").pack(side="right")
 
     def _choose_dict(self) -> None:
-        path = filedialog.askopenfilename(title="Select dictionary (JSON or CSV)", filetypes=(("Dictionary", "*.json *.csv"), ("All files", "*.*")))
+        path = filedialog.askopenfilename(title=self._tr("Select dictionary (JSON or CSV)"), filetypes=(("Dictionary", "*.json *.csv"), ("All files", "*.*")))
         if path:
             self.dict_path_var.set(path)
             self._load_custom_dict(path)
@@ -4900,7 +3645,7 @@ class TranslatorGUI:
         except queue.Empty:
             pass
         try:
-            self.root.after(50, self._drain_log_queue)
+            self._drain_after = self.root.after(50, self._drain_log_queue)
         except Exception:
             pass  # window destroyed
 
@@ -4953,13 +3698,13 @@ class TranslatorGUI:
 
     def _export_logs(self) -> None:
         try:
-            path = filedialog.asksaveasfilename(title="Export logs", defaultextension=".txt", filetypes=(("Text", "*.txt"), ("All files", "*.*")))
+            path = filedialog.asksaveasfilename(title=self._tr("Export logs"), defaultextension=".txt", filetypes=(("Text", "*.txt"), ("All files", "*.*")))
             if not path:
                 return
             with open(path, "w", encoding="utf-8") as wf:
                 for _lvl, line in self._log_entries:
                     wf.write(line + "\n")
-            messagebox.showinfo("Logs", "Logs exported")
+            messagebox.showinfo(self._tr("Log"), self._tr("Logs exported"))
         except Exception:
             pass
 
@@ -5604,57 +4349,6 @@ class TranslatorGUI:
         finally:
             self.files = backup
 
-    def _show_about(self) -> None:
-        try:
-            win = tk.Toplevel(self.root)
-            try:
-                if TBStyle is not None and getattr(self, '_bs', None) is not None:
-                    self._bs.style.master = win  # type: ignore[attr-defined]
-                self._apply_theme()
-            except Exception:
-                pass
-            win.title(self._tr("About"))
-            try:
-                self._apply_theme_to_toplevel(win)
-            except Exception:
-                pass
-            win.geometry("520x360")
-            win.resizable(False, False)
-            frm = ttk.Frame(win)
-            frm.pack(fill="both", expand=True, padx=16, pady=16)
-            ttk.Label(frm, text=f"🌐 {self._tr('Subtitle Translator')}", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-            ttk.Label(frm, text=f"{self._tr('Version:')} 1.0.0").pack(anchor="w", pady=(4, 0))
-            ttk.Label(frm, text=self._tr("Desktop-like Tkinter UI with i18n, themes, and batch translation.")).pack(anchor="w", pady=(2, 8))
-            info = (
-                f"{self._tr('Features:')}\n"
-                f"{self._tr('- Multi-format: SRT, VTT, TXT, MD, CSV, DOCX, PDF')}\n"
-                f"{self._tr('- Engines: Auto / Google / MyMemory with fallback')}\n"
-                f"{self._tr('- Dictionary pre/post apply, case/word-boundary options')}\n"
-                f"{self._tr('- Queue, preview, drag&drop, logging, error policy')}\n"
-                f"{self._tr('- Persistent settings, themes, accent & compact mode')}"
-            )
-            import tkinter.scrolledtext as scrolledtext
-            txt = scrolledtext.ScrolledText(frm, height=10, wrap="word")
-            txt.pack(fill="both", expand=True)
-            txt.insert("1.0", info)
-            txt.configure(state="disabled")
-            # links
-            link_row = ttk.Frame(frm)
-            link_row.pack(fill="x", pady=(8, 0))
-            ttk.Label(link_row, text=self._tr("Project site:")).pack(side="left")
-            lbl = ttk.Label(link_row, text="nicegui.io", foreground="#2563eb", cursor="hand2")
-            lbl.pack(side="left", padx=(6, 0))
-            def _open_link(_e=None):
-                try:
-                    import webbrowser
-                    webbrowser.open("https://nicegui.io/")
-                except Exception:
-                    pass
-            lbl.bind("<Button-1>", _open_link)
-            ttk.Button(frm, text=self._tr("OK"), command=win.destroy, style="Primary.TButton").pack(anchor="e", pady=(12, 0))
-        except Exception:
-            pass
-
     def _cancel_run(self) -> None:
         self._cancel = True
         self.status_var.set(self._tr("Canceling..."))
@@ -5677,6 +4371,8 @@ class TranslatorGUI:
         except Exception:
             pass
         try:
+            self._save_settings()          # remembers window size/maximized state
+            self.root.update_idletasks()   # flush pending <<ThemeChanged>> before the interpreter goes away
             self.root.destroy()
         except Exception:
             pass
@@ -5766,6 +4462,12 @@ class TranslatorGUI:
                     except Exception:
                         pass
             cfg["ui_lang_code"] = str(self.ui_lang_code)
+            cfg["window_maximized"] = bool(getattr(self, "_is_max", True))
+            if not getattr(self, "_is_max", True):
+                try:
+                    cfg["window_geometry"] = self.root.geometry()
+                except Exception:
+                    pass
             code = self._current_target_code() if hasattr(self, "target_lang_var") else None
             if code:
                 cfg["target_lang"] = code
@@ -5855,6 +4557,7 @@ class TranslatorGUI:
                 pass
         self._sync_header_combos()
         self._retranslate_queue_statuses()
+        self._update_empty_state()
         for attr, key in getattr(self, '_tooltip_keys', {}).items():
             try:
                 self._tooltips[attr].text = self._tr(key)
@@ -5901,19 +4604,6 @@ class TranslatorGUI:
         except Exception:
             pass
 
-    # ---- Theme wrappers: every theme change ends with consistent card/titlebar colours ----
-    def _apply_theme(self) -> None:
-        try:
-            self._apply_theme_impl()
-        finally:
-            self._apply_card_colors()
-
-    def _apply_bootstrap_styles(self) -> None:
-        try:
-            self._apply_bootstrap_styles_impl()
-        finally:
-            self._apply_card_colors()
-
     @staticmethod
     def _mix(widget, a: str, b: str, t: float) -> str:
         try:
@@ -5923,47 +4613,6 @@ class TranslatorGUI:
         except Exception:
             return a
 
-    def _apply_card_colors(self) -> None:
-        """Flat panels: card fill = window background, thin outline. Inner widgets keep their
-        default styles, so nothing renders on a mismatched background (old 'patchy' look and
-        the black drop-shadows came from cards that never received theme colours)."""
-        try:
-            style = ttk.Style()
-            bg = style.lookup("TFrame", "background") or self.root.cget("bg")
-            fg = style.lookup("TLabel", "foreground") or self._contrast_fg(self.root, bg)
-            outline = self._mix(self.root, bg, fg, 0.16)
-            for card, _ctx in getattr(self, "card_contexts", []):
-                card.set_colors(fill=bg, shadow=outline)
-            style.configure("CardInner.TFrame", background=bg)
-            # Same background for every control that sits on a panel (radios used to show grey boxes)
-            for st in ("TRadiobutton", "TCheckbutton", "AppHeader.TFrame", "AppHeader.TLabel"):
-                style.configure(st, background=bg)
-            for st in ("TRadiobutton", "TCheckbutton"):
-                # explicit foreground too: in dark mode radios kept dark text on the dark panel
-                style.configure(st, foreground=fg)
-                style.map(st, background=[("active", bg), ("!active", bg)], foreground=[("disabled", outline), ("!disabled", fg)])
-            try:
-                self.root_scroll.canvas.configure(bg=bg)
-            except Exception:
-                pass
-            title_fg = self._contrast_fg(self.root, bg)
-            if hasattr(self, "titlebar"):
-                self.titlebar.configure(bg=bg)
-                for w in self.titlebar.winfo_children():
-                    if isinstance(w, tk.Label):
-                        w.configure(bg=bg, fg=title_fg)
-                    elif isinstance(w, tk.Frame):
-                        w.configure(bg=bg)
-                        for c in w.winfo_children():
-                            if isinstance(c, tk.Label):
-                                c.configure(bg=bg)
-            if hasattr(self, "_top_spacer"):
-                self._top_spacer.configure(bg=bg)
-            if hasattr(self, "circ"):
-                self.circ.set_color(style.lookup("TProgressbar", "background") or "#3b82f6")
-        except Exception:
-            pass
-
     @staticmethod
     def _contrast_fg(widget, bg: str) -> str:
         """Readable text colour for a background (fixes white-on-white title in light theme)."""
@@ -5972,6 +4621,276 @@ class TranslatorGUI:
             return "#1f2937" if (0.2126 * r + 0.7152 * g + 0.0722 * b) > 0.55 else "#f8fafc"
         except Exception:
             return "#1f2937"
+
+    # ======================= Design system =======================
+    # One palette-driven theme on top of ttk 'clam'. Replaces the previous mix of ttkbootstrap
+    # themes + ~550 lines of per-widget colour patches, which rendered differently per machine.
+    ACCENT_HEX = {
+        "blue": ("#2563eb", "#3b82f6"), "purple": ("#7c3aed", "#8b5cf6"), "green": ("#059669", "#10b981"),
+        "orange": ("#ea580c", "#f97316"), "pink": ("#db2777", "#ec4899"), "teal": ("#0d9488", "#14b8a6"),
+    }
+
+    def _palette_for(self, dark: bool, accent: str) -> Dict[str, str]:
+        a_light, a_dark = self.ACCENT_HEX.get(accent, self.ACCENT_HEX["blue"])
+        if dark:
+            p = {"bg": "#0d1117", "surface": "#161b22", "surface2": "#1f2630", "border": "#2b3340",
+                 "text": "#e6edf3", "muted": "#8b949e", "hover": "#262f3b", "accent": a_dark,
+                 "ok": "#3fb950", "err": "#f85149", "danger": "#f85149"}
+        else:
+            p = {"bg": "#eef1f5", "surface": "#ffffff", "surface2": "#f5f7fa", "border": "#dfe4ea",
+                 "text": "#1b2230", "muted": "#667085", "hover": "#eef2f7", "accent": a_light,
+                 "ok": "#15803d", "err": "#dc2626", "danger": "#dc2626"}
+        p["accent_hover"] = self._mix(self.root, p["accent"], "#000000" if not dark else "#ffffff", 0.14)
+        p["sel"] = self._mix(self.root, p["surface"], p["accent"], 0.22 if dark else 0.14)
+        p["stripe"] = self._mix(self.root, p["surface"], p["bg"], 0.45)
+        return p
+
+    def _font_family(self) -> str:
+        try:
+            avail = set(tkfont.families(self.root))
+        except Exception:
+            avail = set()
+        code = (self.ui_lang_code or "en").lower()
+        prefs = {"zh": ["Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC"], "ja": ["Yu Gothic UI", "Meiryo UI", "Meiryo"],
+                 "ko": ["Malgun Gothic", "Noto Sans KR"], "th": ["Leelawadee UI", "Tahoma"], "hi": ["Nirmala UI"]}
+        for fam in prefs.get(code[:2], []) + ["Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", "DejaVu Sans", "Arial"]:
+            if fam in avail:
+                return fam
+        return "TkDefaultFont"
+
+    def _apply_design(self) -> None:
+        dark = bool(self.dark_mode_var.get())
+        p = self._palette_for(dark, self.accent_var.get())
+        self._palette = p
+        compact = bool(self.compact_mode_var.get())
+        try:
+            scale = float(self.font_scale_var.get() or 1.0)
+        except Exception:
+            scale = 1.0
+        fam = self._font_family()
+
+        def sz(n):
+            return max(7, int(round(n * scale)))
+        # fonts
+        for name, size, weight in (("TkDefaultFont", 10, "normal"), ("TkTextFont", 10, "normal"),
+                                   ("TkMenuFont", 10, "normal"), ("TkHeadingFont", 9, "bold"), ("TkTooltipFont", 9, "normal")):
+            try:
+                tkfont.nametofont(name).configure(family=fam, size=sz(size), weight=weight)
+            except Exception:
+                pass
+        mono = next((f for f in ("Cascadia Mono", "Consolas", "DejaVu Sans Mono", "Courier New") if f in set(tkfont.families(self.root))), "TkFixedFont")
+        spec = {"title": (fam, 12, "bold"), "sub": (fam, 9, "normal"), "section": (fam, 11, "bold"), "small": (fam, 9, "normal"),
+                "bold": (fam, 10, "bold"), "big": (fam, 11, "bold"), "mono": (mono, 9, "normal"), "hero": (fam, 30, "normal"),
+                "ring": (fam, 20, "bold")}
+        if not hasattr(self, "_fonts"):
+            self._fonts = {k: tkfont.Font(root=self.root) for k in spec}  # created once, reconfigured on change
+        for k, (f, n, w) in spec.items():
+            self._fonts[k].configure(family=f, size=sz(n), weight=w)
+        pad_btn = (10, 5) if compact else (14, 7)
+        row_h = sz(26 if compact else 32)
+        s = self._style
+        s.configure(".", background=p["surface"], foreground=p["text"], fieldbackground=p["surface2"],
+                    bordercolor=p["border"], lightcolor=p["surface"], darkcolor=p["surface"], troughcolor=p["surface2"],
+                    focuscolor=p["accent"], selectbackground=p["accent"], selectforeground="#ffffff",
+                    insertcolor=p["text"], relief="flat", font="TkDefaultFont")
+        s.configure("App.TFrame", background=p["bg"])
+        for st in ("TFrame", "CardInner.TFrame"):
+            s.configure(st, background=p["surface"])
+        s.configure("Field.TFrame", background=p["surface2"])
+        s.configure("Title.TFrame", background=p["surface"])
+        s.configure("Title.TLabel", background=p["surface"], foreground=p["muted"])
+        s.configure("TLabel", background=p["surface"], foreground=p["text"])
+        s.configure("Muted.TLabel", background=p["surface"], foreground=p["muted"])
+        s.configure("Section.TLabel", background=p["surface"], foreground=p["text"], font=self._fonts["section"])
+        # buttons
+        s.configure("TButton", background=p["surface2"], foreground=p["text"], bordercolor=p["border"],
+                    lightcolor=p["surface2"], darkcolor=p["surface2"], padding=pad_btn, focusthickness=0, anchor="center")
+        s.map("TButton", background=[("disabled", p["surface2"]), ("pressed", p["border"]), ("active", p["hover"])],
+              bordercolor=[("focus", p["accent"]), ("active", p["accent"])], foreground=[("disabled", p["muted"])],
+              lightcolor=[("active", p["hover"])], darkcolor=[("active", p["hover"])])
+        for st, font, padding in (("Accent.TButton", "bold", pad_btn), ("Big.Accent.TButton", "big", (16, 11 if not compact else 7))):
+            s.configure(st, background=p["accent"], foreground="#ffffff", bordercolor=p["accent"], lightcolor=p["accent"],
+                        darkcolor=p["accent"], font=self._fonts[font], padding=padding)
+            s.map(st, background=[("disabled", p["border"]), ("pressed", p["accent_hover"]), ("active", p["accent_hover"])],
+                  bordercolor=[("active", p["accent_hover"])], lightcolor=[("active", p["accent_hover"])],
+                  darkcolor=[("active", p["accent_hover"])], foreground=[("disabled", p["muted"])])
+        s.configure("Danger.TButton", background=p["surface2"], foreground=p["danger"], bordercolor=p["border"],
+                    lightcolor=p["surface2"], darkcolor=p["surface2"], padding=pad_btn)
+        s.map("Danger.TButton", background=[("disabled", p["surface2"]), ("active", p["danger"])],
+              foreground=[("disabled", p["muted"]), ("active", "#ffffff")], bordercolor=[("active", p["danger"])])
+        s.configure("Small.TButton", padding=(10, 3), font=self._fonts["small"])
+        s.configure("Icon.TButton", background=p["surface"], bordercolor=p["surface"], lightcolor=p["surface"],
+                    darkcolor=p["surface"], padding=(6, 4))
+        s.map("Icon.TButton", background=[("active", p["hover"])], bordercolor=[("active", p["border"])])
+        s.configure("Icon.TMenubutton", background=p["surface"], foreground=p["text"], bordercolor=p["surface"],
+                    lightcolor=p["surface"], darkcolor=p["surface"], arrowcolor=p["surface"], padding=(8, 4))
+        s.map("Icon.TMenubutton", background=[("active", p["hover"])])
+        # engine chips
+        s.configure("Chip.Toolbutton", background=p["surface2"], foreground=p["text"], bordercolor=p["border"],
+                    lightcolor=p["surface2"], darkcolor=p["surface2"], padding=(8, 6), anchor="center")
+        s.map("Chip.Toolbutton",
+              background=[("selected", p["accent"]), ("active", p["hover"])],
+              foreground=[("selected", "#ffffff")], bordercolor=[("selected", p["accent"]), ("active", p["accent"])],
+              lightcolor=[("selected", p["accent"])], darkcolor=[("selected", p["accent"])])
+        # check / radio
+        for st in ("TCheckbutton", "TRadiobutton"):
+            s.configure(st, background=p["surface"], foreground=p["text"], indicatorbackground=p["surface2"],
+                        indicatorforeground=p["accent"], indicatorcolor=p["surface2"], bordercolor=p["border"])
+            s.map(st, background=[("active", p["surface"])], indicatorcolor=[("selected", p["accent"]), ("pressed", p["hover"])],
+                  foreground=[("disabled", p["muted"])])
+        # inputs
+        for st in ("TEntry", "Placeholder.TEntry", "TCombobox", "TSpinbox"):
+            s.configure(st, fieldbackground=p["surface2"], background=p["surface2"], foreground=p["text"],
+                        bordercolor=p["border"], lightcolor=p["surface2"], darkcolor=p["surface2"],
+                        arrowcolor=p["muted"], padding=(8, 5))
+            s.map(st, bordercolor=[("focus", p["accent"]), ("hover", p["muted"])],
+                  lightcolor=[("focus", p["accent"])], fieldbackground=[("readonly", p["surface2"]), ("disabled", p["surface"])],
+                  foreground=[("readonly", p["text"]), ("disabled", p["muted"])],
+                  selectbackground=[("readonly", p["surface2"])], selectforeground=[("readonly", p["text"])],
+                  background=[("readonly", p["surface2"]), ("active", p["hover"])], arrowcolor=[("active", p["text"])])
+        s.configure("Placeholder.TEntry", foreground=p["muted"])
+        s.map("Placeholder.TEntry", foreground=[("!disabled", p["muted"])])
+        s.configure("Title.TCombobox")
+        # tree
+        s.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        s.configure("Treeview", background=p["surface2"], fieldbackground=p["surface2"], foreground=p["text"],
+                    bordercolor=p["surface2"], rowheight=row_h, font="TkDefaultFont")
+        s.map("Treeview", background=[("selected", p["sel"])], foreground=[("selected", p["text"])])
+        s.configure("Treeview.Heading", background=p["surface2"], foreground=p["muted"], bordercolor=p["border"],
+                    lightcolor=p["surface2"], darkcolor=p["surface2"], relief="flat", padding=(10, 7), font=self._fonts["small"])
+        s.map("Treeview.Heading", background=[("active", p["hover"])], foreground=[("active", p["text"])])
+        try:
+            self.tree.tag_configure("evenrow", background=p["surface2"])
+            self.tree.tag_configure("oddrow", background=self._mix(self.root, p["surface2"], p["border"], 0.35))
+        except Exception:
+            pass
+        # progress & scrollbars
+        s.configure("Thin.Horizontal.TProgressbar", troughcolor=p["surface2"], background=p["accent"], bordercolor=p["surface2"],
+                    lightcolor=p["accent"], darkcolor=p["accent"], thickness=6)
+        s.configure("TProgressbar", background=p["accent"])
+        for orient in ("Vertical", "Horizontal"):
+            st = f"Modern.{orient}.TScrollbar"
+            s.layout(st, [(f"{orient}.Scrollbar.trough", {"children": [(f"{orient}.Scrollbar.thumb", {"expand": True, "sticky": "nswe"})],
+                                                          "sticky": "ns" if orient == "Vertical" else "we"})])
+            s.configure(st, troughcolor=p["surface2"], background=p["border"], bordercolor=p["surface2"],
+                        lightcolor=p["border"], darkcolor=p["border"], arrowsize=9, width=9)
+            s.map(st, background=[("active", p["muted"]), ("pressed", p["muted"])])
+        s.configure("TSeparator", background=p["border"])
+        s.configure("TLabelframe", background=p["surface"], bordercolor=p["border"], lightcolor=p["surface"], darkcolor=p["surface"])
+        s.configure("TLabelframe.Label", background=p["surface"], foreground=p["muted"], font=self._fonts["bold"])
+        s.configure("TNotebook", background=p["surface"], bordercolor=p["border"], tabmargins=(0, 4, 0, 0))
+        s.configure("TNotebook.Tab", background=p["surface2"], foreground=p["muted"], bordercolor=p["border"],
+                    lightcolor=p["surface2"], darkcolor=p["surface2"], padding=(16, 7))
+        s.map("TNotebook.Tab", background=[("selected", p["accent"]), ("active", p["hover"])],
+              foreground=[("selected", "#ffffff"), ("active", p["text"])],
+              lightcolor=[("selected", p["accent"])], darkcolor=[("selected", p["accent"])], bordercolor=[("selected", p["accent"])])
+        s.configure("TMenubutton", background=p["surface2"], foreground=p["text"], bordercolor=p["border"], arrowcolor=p["muted"], padding=(8, 4))
+        s.configure("TScale", background=p["surface"], troughcolor=p["surface2"])
+        # combobox drop-downs (existing ones too)
+        for opt, val in (("*TCombobox*Listbox.background", p["surface"]), ("*TCombobox*Listbox.foreground", p["text"]),
+                         ("*TCombobox*Listbox.selectBackground", p["accent"]), ("*TCombobox*Listbox.selectForeground", "#ffffff"),
+                         ("*TCombobox*Listbox.font", "TkDefaultFont"), ("*TCombobox*Listbox.borderWidth", 0)):
+            self.root.option_add(opt, val)
+        for cb in ("cmb_theme", "cmb_accent", "cmb_ui_quick", "cmb_lang"):
+            try:
+                pop = self.root.tk.call("ttk::combobox::PopdownWindow", getattr(self, cb))
+                self.root.tk.call(f"{pop}.f.l", "configure", "-background", p["surface"], "-foreground", p["text"],
+                                  "-selectbackground", p["accent"], "-selectforeground", "#ffffff")
+            except Exception:
+                pass
+        # classic Tk widgets
+        self.root.configure(bg=p["bg"])
+        try:
+            self.root_scroll.canvas.configure(bg=p["bg"])
+        except Exception:
+            pass
+        if hasattr(self, "titlebar"):
+            self.titlebar.configure(bg=p["surface"])
+            self.titlebar_border.configure(bg=p["border"])
+            for f in getattr(self, "_tb_frames", []):
+                f.configure(bg=p["surface"])
+            for w in self.titlebar.winfo_children():
+                for c in [w] + list(w.winfo_children()):
+                    if isinstance(c, tk.Label):
+                        c.configure(bg=p["surface"])
+            self.lbl_app_title.configure(bg=p["surface"], fg=p["text"], font=self._fonts["title"])
+            self.lbl_app_subtitle.configure(bg=p["surface"], fg=p["muted"], font=self._fonts["sub"])
+            for b in getattr(self, "_win_btns", []):
+                b.configure(bg=p["surface"], fg=p["muted"], font=self._fonts["small"])
+        for m in ("header_menu", "header_font_menu", "tree_menu"):
+            try:
+                getattr(self, m).configure(bg=p["surface"], fg=p["text"], activebackground=p["sel"], activeforeground=p["text"],
+                                           selectcolor=p["accent"], bd=0, relief="flat", font="TkMenuFont")
+            except Exception:
+                pass
+        if hasattr(self, "txt_log"):
+            self.txt_log.configure(bg=p["surface2"], fg=p["text"], insertbackground=p["text"], selectbackground=p["sel"],
+                                   selectforeground=p["text"], font=self._fonts["mono"])
+            self.txt_log.tag_configure("info", foreground=p["muted"])
+            self.txt_log.tag_configure("ok", foreground=p["ok"])
+            self.txt_log.tag_configure("error", foreground=p["err"])
+        if hasattr(self, "empty_state"):
+            for w in (self.empty_state, self.lbl_empty_icon, self.lbl_empty_title, self.lbl_empty_sub):
+                w.configure(bg=p["surface2"])
+            self.lbl_empty_icon.configure(fg=p["accent"], font=self._fonts["hero"])
+            self.lbl_empty_title.configure(fg=p["text"], font=self._fonts["big"])
+            self.lbl_empty_sub.configure(fg=p["muted"], font=self._fonts["small"])
+        for card, _ctx in getattr(self, "card_contexts", []):
+            card.set_colors(fill=p["surface"], shadow=p["border"], outer=p["bg"])
+        if hasattr(self, "circ"):
+            self.circ.set_palette(bg=p["surface"], track=p["border"], color=p["accent"], text=p["text"], font=self._fonts["ring"])
+        if hasattr(self, "lbl_status"):
+            try:
+                self.lbl_status.configure(wraplength=max(220, int(320 * scale)))
+            except Exception:
+                pass
+
+    def _apply_theme(self) -> None:
+        self._apply_design()
+
+    def _apply_bootstrap_styles(self) -> None:
+        self._apply_design()
+
+    def _apply_card_colors(self) -> None:
+        self._apply_design()
+
+    def _apply_font_scale(self) -> None:
+        self._apply_design()
+
+    def _ensure_ui_font_family(self) -> None:
+        self._apply_design()
+
+    def _apply_theme_to_toplevel(self, win) -> None:
+        """Dialogs: ttk widgets follow the global styles; colour the window and any classic Tk widgets."""
+        p = getattr(self, "_palette", None) or self._palette_for(bool(self.dark_mode_var.get()), self.accent_var.get())
+        try:
+            win.configure(bg=p["surface"])
+        except Exception:
+            pass
+        stack = list(win.winfo_children())
+        while stack:
+            w = stack.pop()
+            stack.extend(w.winfo_children())
+            cls = w.winfo_class()
+            try:
+                if cls in ("Text", "Listbox"):
+                    w.configure(bg=p["surface2"], fg=p["text"], insertbackground=p["text"], selectbackground=p["sel"],
+                                highlightthickness=0, bd=0)
+                elif cls in ("Frame", "Canvas", "Label", "Toplevel"):
+                    w.configure(bg=p["surface"])
+                    if cls == "Label":
+                        w.configure(fg=p["text"])
+                elif cls == "Spinbox":
+                    w.configure(bg=p["surface2"], fg=p["text"], buttonbackground=p["surface2"], insertbackground=p["text"])
+            except Exception:
+                pass
+
+    def _build_section_header(self, parent, title: str, ctx: str = "") -> ttk.Label:
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=14, pady=(12, 8))
+        lbl = ttk.Label(row, text=title, style="Section.TLabel")
+        lbl.pack(side="left")
+        return lbl
 
 
 def launch_gui() -> None:
