@@ -1300,7 +1300,7 @@ def _extract_google_mobile_result(html_text: str) -> Optional[str]:
 
 def _google_translate_one_http(text: str, target_lang: str, attempts: int = 6) -> Optional[str]:
     sess = _get_google_session()
-    if sess is None or not text or not str(text).strip():
+    if sess is None or not text or not str(text).strip() or _endpoint_blocked("google_m"):
         return None
     src = str(text).strip()
     last_status = None
@@ -1315,8 +1315,9 @@ def _google_translate_one_http(text: str, target_lang: str, attempts: int = 6) -
                 last_status = resp.status_code
                 body = resp.text or ""
             if last_status == 429:
-                time.sleep(min(20.0, 2.5 * (attempt + 1)))
-                continue
+                # IP is rate-limited; retrying only burns ~1 min per line. Stop using /m for a while.
+                _block_endpoint("google_m")
+                return None
             if last_status != 200:
                 time.sleep(min(15.0, 1.2 * (attempt + 1)))
                 continue
@@ -1409,7 +1410,7 @@ def _google_translate_batch_safe(
         if cancel_check and cancel_check():
             break
         out = _google_translate_one_http(src, target_lang)
-        if out is None and google is not None:
+        if out is None and google is not None and not _endpoint_blocked("google_m"):
             try:
                 one = google.translate(src)
                 if not _is_bad_translation(one, src):
@@ -1419,8 +1420,109 @@ def _google_translate_batch_safe(
         if out is None:
             out = _mymemory_translate_one_http(src, target_lang)
         results[idx] = out
-        time.sleep(0.12)
+        if not _endpoint_blocked("google_m"):
+            time.sleep(0.12)
     return results
+
+
+# ---- Fast path: Google's JSON endpoint, many lines per request ----------------------------
+# translate.google.com/m (HTML scraping, one request per line) gets IP-blocked with HTTP 429
+# for hours after a few hundred requests; each blocked line then cost ~56 s of retries, so a
+# film took ~22 h and the progress bar did not move. The gtx JSON endpoint takes a whole block
+# of lines in one request (~10 requests per film) and keeps working while /m is blocked.
+_GTX_URL = "https://translate.googleapis.com/translate_a/single"
+_GTX_MAX_CHARS = 3800
+_GTX_MAX_LINES = 120
+_BLOCKED_UNTIL: Dict[str, float] = {}   # endpoint -> time.time() until which we do not call it
+
+
+def _endpoint_blocked(name: str) -> bool:
+    return time.time() < _BLOCKED_UNTIL.get(name, 0.0)
+
+
+def _block_endpoint(name: str, seconds: float = 600.0) -> None:
+    _BLOCKED_UNTIL[name] = time.time() + seconds
+
+
+def _gtx_request(block: str, target_lang: str) -> Optional[str]:
+    """One request for a newline-joined block. Returns the translated block or None."""
+    if requests is None or _endpoint_blocked("gtx"):
+        return None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                _GTX_URL,
+                params={"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t"},
+                data={"q": block},
+                headers={"User-Agent": _GOOGLE_UA},
+                timeout=30,
+            )
+        except Exception:
+            time.sleep(1.0 + attempt)
+            continue
+        if resp.status_code == 429:
+            _block_endpoint("gtx")
+            return None
+        if resp.status_code != 200:
+            time.sleep(1.0 + attempt)
+            continue
+        try:
+            data = resp.json()
+            return "".join(seg[0] for seg in data[0] if seg and seg[0])
+        except Exception:
+            return None
+    return None
+
+
+def _gtx_translate_lines(lines: List[str], target_lang: str) -> List[Optional[str]]:
+    """Translate lines in one request; if Google merges/splits lines (count mismatch), bisect
+    so translations can never shift onto the wrong line."""
+    if not lines:
+        return []
+    safe = [ln.replace("\n", " ") for ln in lines]
+    out = _gtx_request("\n".join(safe), target_lang)
+    if out is None:
+        return [None] * len(lines)
+    parts = out.split("\n")
+    if len(parts) == len(lines):
+        return [p.strip() or None for p in parts]
+    if len(lines) == 1:
+        return [out.strip() or None]
+    mid = len(lines) // 2
+    return _gtx_translate_lines(lines[:mid], target_lang) + _gtx_translate_lines(lines[mid:], target_lang)
+
+
+def _gtx_translate_texts(texts: List[str], target_lang: str,
+                         on_chunk: Optional[Callable[[List[str], List[Optional[str]]], None]] = None,
+                         cancel_check: Optional[Callable[[], bool]] = None) -> Dict[str, str]:
+    """Translate many texts in character-bounded chunks; returns only successful results."""
+    result: Dict[str, str] = {}
+    chunk_buf: List[str] = []
+    size = 0
+    chunks: List[List[str]] = []
+    for t in texts:
+        if chunk_buf and (size + len(t) + 1 > _GTX_MAX_CHARS or len(chunk_buf) >= _GTX_MAX_LINES):
+            chunks.append(chunk_buf)
+            chunk_buf, size = [], 0
+        chunk_buf.append(t)
+        size += len(t) + 1
+    if chunk_buf:
+        chunks.append(chunk_buf)
+    for i, ch in enumerate(chunks):
+        if (cancel_check and cancel_check()) or _endpoint_blocked("gtx"):
+            break
+        outs = _gtx_translate_lines(ch, target_lang)
+        for src, dst in zip(ch, outs):
+            if dst and not _is_bad_translation(dst, src):
+                result[src] = dst
+        if on_chunk:
+            try:
+                on_chunk(ch, outs)
+            except Exception:
+                pass
+        if i + 1 < len(chunks):
+            time.sleep(0.4)  # gentle pacing between requests
+    return result
 
 
 def _build_translation_map(
@@ -1456,6 +1558,20 @@ def _build_translation_map(
     # Instantiate translators lazily
     google = GoogleTranslator(source="auto", target=target_lang) if use_google else None
     mymemory = None
+
+    confirmed_same: set = set()
+    # Fast path: whole blocks through Google's JSON endpoint; only failures go the slow way
+    if use_google and unique_texts:
+        def _fast_progress(chunk_texts: List[str], outs: List[Optional[str]]) -> None:
+            nonlocal processed_words
+            processed_words += sum(word_count_map.get(t, 0) for t, o in zip(chunk_texts, outs) if o)
+            if progress_callback:
+                progress_callback(min(processed_words, total_words), max(1, total_words))
+        translated_map.update(_gtx_translate_texts(unique_texts, target_lang, _fast_progress, cancel_check))
+        # names / interjections ("Rick.", "Ah!") come back unchanged from a *successful* response:
+        # they are done, not failures to retry
+        confirmed_same.update(t for t, v in translated_map.items() if v.strip() == t.strip())
+        batches = chunk([t for t in unique_texts if t not in translated_map], max(1, int(batch_size)))
 
     # Helper: primary engine batch call with global throttling
     def _primary_translate_batch(engine_name: str, texts_batch: List[str]) -> Optional[List[str]]:
@@ -1690,6 +1806,8 @@ def _build_translation_map(
     # original English text in place, retry those a few more times with
     # backoff before giving up for good.
     def _looks_untranslated(src: str) -> bool:
+        if src in confirmed_same:
+            return False
         cur = translated_map.get(src)
         if cur is None or _is_bad_translation(cur, src):
             return True
@@ -1701,6 +1819,8 @@ def _build_translation_map(
         if not pending or (cancel_check and cancel_check()):
             break
         time.sleep(min(20.0, 2.0 * (round_no + 1)))
+        translated_map.update(_gtx_translate_texts(pending, target_lang, cancel_check=cancel_check))
+        pending = [t for t in pending if _looks_untranslated(t)]
         still_pending: List[str] = []
         for src in pending:
             if cancel_check and cancel_check():

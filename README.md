@@ -22,8 +22,11 @@ Zaman damgaları, sıra numaraları ve satır yapısı korunur · Çoklu motor �
 
 ---
 
-> [!WARNING]
-> **Alpha sürüm.** Uzun dosyalarda Google hız sınırına (HTTP 429) takılınca bazı satırlar **çevrilmeden** kalabiliyor ve uygulama bunu şu an bildirmiyor. Çıktıyı mutlaka kontrol edin. Ayrıntılar ve geçici çözümler için: [Bilinen sorunlar → H1](docs/KNOWN_ISSUES.md#h1--rate-limit-429-durumunda-çeviri-sessizce-kayboluyor). Düzeltme planı: [Yol haritası → Faz 1–2](docs/ROADMAP.md).
+> [!NOTE]
+> **Hız:** satırlar paketler hâlinde tek istekte gönderilir — 1.467 satırlık bir film ~12 saniyede çevrilir
+> (eskiden satır başına bir istek; Google engelleyince saatler sürüyordu). Bir servis engellenirse otomatik olarak
+> diğerine geçilir. Tüm servisler başarısız olursa satırlar hâlâ çevrilmeden kalabilir ve bu henüz arayüzde ayrıca
+> bildirilmiyor ([H1](docs/KNOWN_ISSUES.md)) — CLI uyarı verir.
 
 ## Özellikler
 
@@ -143,9 +146,10 @@ Kapsamlı bir denetim yapıldı: **77 sorun** önem sırasına göre katalogland
 Tkinter'a doğrudan erişmesi, çalışmayan fare tekerleği ve log filtreleri, görünmeyen menüler, 133 yerine 37 hedef dil,
 silinen API anahtarları, açılışta kaybolan koyu tema, yanlış varsayılan hedef dil ("Almanca").
 
-**Açık (çeviri motoru):**
-- 🔴 Hız sınırında sessiz çeviri kaybı ve "toplu" çevirinin aslında satır başına istek olması — bir film 1.401 istek yerine **8 istekle** çevrilebilir (ölçüldü: 80 satır 55.6 sn → 1.0 sn)
-- 🔴 Paylaşılan translator nesnesinde yarış durumu, HTTP zaman aşımı yok
+**Düzeltildi (çeviri motoru):** gerçek toplu istek (film ~22 saat yerine ~12 sn), engellenen servis için devre kesici,
+MyMemory yedeği ve yeniden deneme turu, thread yarışı, HTTP zaman aşımları.
+
+**Açık:** tüm servisler başarısız olduğunda satırların arayüzde ayrıca raporlanması (H1'in kalan kısmı), replik bazlı çeviri (H12).
 
 Tam liste: [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) · Plan: [docs/ROADMAP.md](docs/ROADMAP.md)
 

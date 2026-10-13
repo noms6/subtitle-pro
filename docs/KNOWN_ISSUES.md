@@ -22,7 +22,12 @@ Her hata bir test ile belgelenmiştir. Testler `xfail(strict=True)` olarak işar
 
 ## 🔴 Kritik
 
-### H1 — Rate limit (429) durumunda çeviri sessizce kayboluyor
+> **Güncelleme (2026-10-13):** C:\torrent kopyasındaki motor düzeltmeleri birleştirildi ve toplu JSON yolu eklendi.
+> H2/H3/H47/H51 kapandı; H1 büyük ölçüde (429 → yedek motor + yeniden deneme). Kalan: tüm servisler başarısız
+> olduğunda arayüzün dosyayı "Tamamlandı" göstermesi (`test_e2e_rate_limited_file_reported`).
+> Ölçüm: 1.467 satırlık film **11,4 sn** (arayüz üzerinden), ~10 istek; eskiden `/m` engelliyken satır başına 56 sn.
+
+### 🟡 H1 — Rate limit (429) durumunda çeviri sessizce kayboluyor
 - **Yer:** `_build_translation_map` → `_primary_translate_batch` ([translate_srt.py:1306-1327](../translate_srt.py#L1306-L1327)), ana döngü [1404](../translate_srt.py#L1404), fallback koşulu [1423](../translate_srt.py#L1423)
 - **Ne oluyor:** Parti 3 kez başarısız olunca satırlar tek tek deneniyor; yine olmazsa **orijinal metin** sonuç listesine ekleniyor. Ana döngü bunu başarı sayıyor, MyMemory yedeği yalnızca `None` değerler için çalıştığından hiç devreye girmiyor. Dosya "Tamamlandı" olarak işaretleniyor, CLI 0 ile çıkıyor.
 - **Kanıt:**
@@ -31,13 +36,13 @@ Her hata bir test ile belgelenmiştir. Testler `xfail(strict=True)` olarak işar
   - Testler: `test_engine.py::test_rate_limited_google_returns_originals_silently`, `test_rate_limit_mid_run_leaves_tail_untranslated`, `test_gui.py::test_e2e_rate_limited_file_marked_done_but_untranslated`, `tests/test_network.py::test_pipeline_small_file`
 - **Çözüm:** Satır başına durum (`ok/failed/skipped`); başarısız satırlar `None` kalsın → motor zinciri → hâlâ başarısızsa dosya "Kısmi (N satır)" olarak raporlansın, CLI sıfırdan farklı kodla çıksın.
 
-### H2 — "Toplu çeviri" aslında satır başına bir HTTP isteği
+### ✅ H2 — "Toplu çeviri" aslında satır başına bir HTTP isteği
 - **Yer:** `google.translate_batch(...)` [1208](../translate_srt.py#L1208); `deep_translator 1.11.4` `_translate_batch` içeride her metin için `requests.get` yapıyor (HTML kazıma + BeautifulSoup, bağlantı yeniden kullanımı yok).
 - **Ölçüm (`tools/benchmark.py`, örnek film):** 1.401 benzersiz satır = **1.401 istek**. Gerçek gecikmeyle (~0.7 sn/istek, 4 eşzamanlı) ≈ 4 dk; ancak Google ~200 istekten sonra 429 verdiği için tam bir film **pratikte asla bitmiyor**.
 - **Kanıt:** canlı 80 satır = 55.6 sn (1.4 satır/sn). Aynı 80 satır tek istekte (`translate_a/single`, `\n` ile birleşik) = **1.0 sn**, 80/80 satır doğru döndü. Film için **8 istek** yeterli (175× az).
 - **Testler:** `test_one_request_per_line_no_real_batching`, `test_one_bad_item_triggers_request_amplification` (tek bozuk satır 10'luk partide ≥28 isteğe yol açıyor), `test_request_budget_with_one_bad_item` (xfail), `test_network.py::test_google_joined_request_keeps_line_count`
 
-### H3 — Tek translator nesnesi 4 thread arasında paylaşılıyor
+### ✅ H3 — Tek translator nesnesi 4 thread arasında paylaşılıyor
 - **Yer:** [1191](../translate_srt.py#L1191) `google = GoogleTranslator(...)` tüm pool worker'larında ortak. deep_translator `translate()` her çağrıda `self._url_params`'ı değiştirip sonra istek atıyor.
 - **Kanıt:** `test_race_with_stateful_translator` — aynı desene sahip sahte motorla **satırların çevirileri birbirine karışıyor**. `test_single_translator_instance_shared_across_threads`.
 - **Çözüm:** Thread başına nesne (`threading.local`) veya durumsuz HTTP istemcisi.
@@ -47,12 +52,12 @@ Her hata bir test ile belgelenmiştir. Testler `xfail(strict=True)` olarak işar
 - **Kanıt:** Ana döngü çalışmazken worker `RuntimeError: main thread is not in main loop` ile çöküyor (test geliştirme sırasında gözlendi) → pencere kapanırken çeviri sürüyorsa aynı hata. `test_error_dialog_requested_from_worker_thread`.
 - **Çözüm (uygulandı):** Ayarlar başlangıçta ana thread'de anlık görüntüye alınıyor; worker tüm UI güncellemelerini (`_post`) bir kuyruğa koyuyor, Tk thread'i 50 ms'de bir boşaltıyor; hata diyaloğu `_call_on_ui` ile ana thread'de açılıyor. Test: `test_worker_never_calls_tk_directly`, `test_error_dialog_on_main_thread`.
 
-### H47 — Google IP engeli uzun sürüyor (operasyonel)
+### ✅ H47 — Google IP engeli uzun sürüyor (operasyonel)
 - **Kanıt:** İlk 429'dan **1.5 saat sonra** `translate.google.com/m` hâlâ 429 dönüyor; aynı IP'den `translate.googleapis.com/translate_a/single` ve MyMemory sorunsuz.
 - **Etki:** H1 ile birleşince kullanıcı saatlerce "başarılı" ama çevrilmemiş dosyalar üretir.
 - **Çözüm:** H2 (istek sayısını 100× azalt) + token-bucket hız sınırlayıcı + 429'da motor değiştirme + kullanıcıya görünür uyarı.
 
-### H51 — HTTP isteklerinde zaman aşımı yok
+### ✅ H51 — HTTP isteklerinde zaman aşımı yok
 - **Yer:** deep_translator `requests.get(...)` `timeout` parametresi olmadan çağrılıyor.
 - **Etki:** Askıda kalan bir bağlantı worker'ı süresiz kilitler; İptal düğmesi beklemedeki isteği kesemez, `_API_SEM` slotu sonsuza dek dolu kalır.
 
