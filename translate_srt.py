@@ -2558,7 +2558,15 @@ class TranslatorGUI:
                 ctypes.windll.user32.SetWindowLongW(hwnd, -20, style)
         except Exception:
             pass
+        # Map fully transparent, let Tk paint every widget, then reveal: the user never sees
+        # the half-drawn first frame (cards filling in piece by piece).
+        try:
+            self.root.attributes("-alpha", 0.0)
+        except Exception:
+            pass
         self.root.deiconify()
+        self.root.update()
+        self.root.after(80, lambda: self.root.attributes("-alpha", 1.0))
         # Started via pyw/run_app.bat the process is not the foreground app, so Windows would open
         # the window *behind* other windows: raise it briefly as topmost, then release.
         self.root.attributes("-topmost", True)
