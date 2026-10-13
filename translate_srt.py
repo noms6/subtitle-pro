@@ -2790,7 +2790,7 @@ class TranslatorGUI:
         self.lbl_hdr_theme = ttk.Label(hr, text="◐", style="Title.TLabel")
         self.lbl_hdr_theme.pack(side="left", padx=(0, 6))
         self.theme_var = tk.StringVar(value=("dark" if self.dark_mode_var.get() else "light"))
-        self.cmb_theme = ttk.Combobox(hr, state="readonly", width=8)
+        self.cmb_theme = ttk.Combobox(hr, state="readonly", width=11)  # fits "Dark mode" / "Mode sombre"
         self.cmb_theme.pack(side="left", padx=(0, 14))
 
         def _on_theme_pick(_e=None):
@@ -2803,7 +2803,7 @@ class TranslatorGUI:
         self.cmb_theme.bind("<<ComboboxSelected>>", _on_theme_pick)
         self.lbl_hdr_accent = ttk.Label(hr, text="🎨", style="Title.TLabel")
         self.lbl_hdr_accent.pack(side="left", padx=(0, 6))
-        self.cmb_accent = ttk.Combobox(hr, state="readonly", width=10)
+        self.cmb_accent = ttk.Combobox(hr, state="readonly", width=15)  # longest colour names (fi, pl, el)
         self.cmb_accent.pack(side="left", padx=(0, 14))
 
         def _on_accent_pick(_e=None):
@@ -3027,10 +3027,10 @@ class TranslatorGUI:
         for i, (val, txt, ttip) in enumerate(engines):
             rb = ttk.Radiobutton(chips, text=self._tr(txt), value=val, variable=self.engine_var, style="Chip.Toolbutton",
                                  command=lambda: (self._refresh_status_bar(), self._save_settings()))
-            rb.grid(row=i // 3, column=i % 3, sticky="ew", padx=2, pady=2)
+            rb.grid(row=i // 2, column=i % 2, sticky="ew", padx=2, pady=2)  # 2 columns: long names (fi "Automaattinen") fit with wider fonts
             self.engine_radios[val] = rb
             tip(f"engine_{val}", rb, ttip)
-        for col in range(3):
+        for col in range(2):
             chips.columnconfigure(col, weight=1, uniform="chips")
         run_row = ttk.Frame(frm_lang)
         run_row.pack(fill="x")

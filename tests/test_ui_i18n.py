@@ -345,3 +345,15 @@ def test_default_target_language(gui):
     gui.ui_lang_code = "de"
     assert gui._default_target_code(None) == "de"
     gui.ui_lang_code = "en"
+
+
+def test_header_pickers_fit_every_translation(gui):
+    """Combobox text is not covered by the clipping audit: "Dark mode" showed as "Dark moc"."""
+    import tkinter.font as tkfont
+    gui.root.update()
+    font = tkfont.nametofont("TkDefaultFont")
+    for cb, keys in ((gui.cmb_theme, ("Light mode", "Dark mode")),
+                     (gui.cmb_accent, tuple(a.capitalize() for a in gui.ACCENTS))):
+        room = cb.winfo_width() - 26  # arrow + padding
+        too_long = [(c, PACKS[c][k]) for c in PACKS for k in keys if font.measure(PACKS[c][k]) > room]
+        assert not too_long, too_long[:5]

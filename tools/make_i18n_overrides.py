@@ -88,6 +88,7 @@ CANCEL = {"de": "Abbrechen", "ar": "إلغاء", "fa": "لغو", "hi": "रद�
           "no": "Avbryt", "fi": "Peruuta", "bg": "Отказ", "sr": "Откажи", "hr": "Odustani", "sl": "Prekliči",
           "lt": "Atšaukti", "lv": "Atcelt", "et": "Tühista", "id": "Batal", "vi": "Hủy", "th": "ยกเลิก"}
 MISC = {"de": {"UI language:": "Oberflächensprache:", "Engine:": "Dienst:"}}
+MISC["vi"] = {"Blue": "Xanh dương", "Purple": "Tím", "Green": "Xanh lá", "Orange": "Cam", "Pink": "Hồng", "Teal": "Xanh ngọc"}
 # "Open output folder" | "Open folder" | first-word for "<engine> first" (fmt with {e})
 OPEN = {
  "ar": ("فتح مجلد الإخراج", "فتح المجلد", "{e} أولاً"), "bg": ("Отвори изходната папка", "Отвори папката", "Първо {e}"),
