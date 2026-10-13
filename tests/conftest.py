@@ -44,6 +44,17 @@ class FakeEngineState:
         return sum(1 for e, _ in self.calls if e == engine)
 
 
+@pytest.fixture(autouse=True)
+def _no_network(request, monkeypatch):
+    """The engine also talks HTTP directly (requests session for Google /m and the MyMemory
+    API). Offline tests must never reach the network, so disable it unless marked `network`."""
+    if request.node.get_closest_marker("network"):
+        return
+    monkeypatch.setattr(T, "requests", None, raising=False)
+    monkeypatch.setattr(T, "_GOOGLE_SESSION", None, raising=False)
+    monkeypatch.setattr(T, "_MYMEMORY_QUOTA_HIT", False, raising=False)
+
+
 @pytest.fixture
 def engines(monkeypatch):
     state = FakeEngineState()
@@ -86,6 +97,22 @@ def engines(monkeypatch):
 
     monkeypatch.setattr(T, "GoogleTranslator", FakeGoogle)
     monkeypatch.setattr(T, "MyMemoryTranslator", FakeMyMemory)
+
+    # Direct-HTTP helpers of the engine route through the same fakes (None = failed request)
+    def http_google(text, target_lang, attempts=6):
+        try:
+            return FakeGoogle(target=target_lang if target_lang in ("tr", "en", "de", "fr", "es", "ja", "it", "ru", "zh-CN") else "tr").translate(text)
+        except Exception:
+            return None
+
+    def http_mymemory(text, target_lang):
+        try:
+            return FakeMyMemory().translate(text)
+        except Exception:
+            return None
+    if hasattr(T, "_google_translate_one_http"):
+        monkeypatch.setattr(T, "_google_translate_one_http", http_google)
+        monkeypatch.setattr(T, "_mymemory_translate_one_http", http_mymemory)
     # Retry back-off sleeps would make failure-path tests take minutes.
     monkeypatch.setattr(T.time, "sleep", lambda s: None)
     state.FakeGoogle = FakeGoogle

@@ -33,3 +33,7 @@ desktop.ini
 translate_srt1.py
 test_runner.py
 test_runner_full.py
+
+# Local crash log / shortcuts
+subtitle_pro_error.log
+*.lnk

@@ -144,21 +144,23 @@ def test_e2e_srt_translation(clean, engines, tmp_path):
 
 
 def test_e2e_rate_limited_file_marked_done_but_untranslated(clean, engines, tmp_path):
-    """Characterises H1 at user level: 429 everywhere -> file says 'Tamamlandı', content is English."""
+    """Remaining H1 at user level: every engine fails -> file still says 'Completed', content is English."""
     engines.google_always_fail = True
+    engines.mm_always_fail = True
     app = clean
     p = make_srt(tmp_path)
     app._add_file(p)
     app._start()
     pump(app)
     text = (tmp_path / "movie.en.tr.srt").read_bytes().decode("utf-8-sig")
-    assert "Stop! Stop the bus!" in text and "TR<" not in text
+    assert "Stop! Stop the bus!" in text and "TR<" not in text and "MM<" not in text
     assert status_of(app, p) == app._tr("Completed")
 
 
 @pytest.mark.xfail(strict=True, reason="H1: a file whose lines failed must not be reported as 'Tamamlandı'")
 def test_e2e_rate_limited_file_reported(clean, engines, tmp_path):
     engines.google_always_fail = True
+    engines.mm_always_fail = True
     app = clean
     p = make_srt(tmp_path)
     app._add_file(p)

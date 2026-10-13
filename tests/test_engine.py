@@ -63,29 +63,29 @@ def test_none_inputs_ignored(engines):
 
 
 # ---------- H1: silent failure ----------
-@pytest.mark.xfail(strict=True, reason="H1 (CRITICAL): when Google returns 429 the original text is stored as the 'translation' and MyMemory fallback never runs")
 def test_rate_limited_google_falls_back_to_mymemory(engines):
+    """H1 (fixed in the C:\\torrent copy's engine): 429 from Google -> MyMemory fallback."""
     engines.google_always_fail = True
     m = build(TEXTS, engine_mode="google")
     assert all(m[t] != t for t in TEXTS)
     assert engines.count("mymemory") == len(TEXTS)
 
 
-def test_rate_limited_google_returns_originals_silently(engines):
-    """Characterises H1: no exception, no flag — caller cannot tell anything failed."""
+def test_all_engines_failing_still_returns_originals_silently(engines):
+    """Remaining part of H1: when every engine fails the originals come back with no signal."""
     engines.google_always_fail = True
+    engines.mm_always_fail = True
     m = build(TEXTS, engine_mode="google")
     assert m == {t: t for t in TEXTS}
-    assert engines.count("mymemory") == 0
 
 
-def test_rate_limit_mid_run_leaves_tail_untranslated(engines):
-    """Real-world scenario seen in the sample movie: first ~N requests succeed, then 429."""
+def test_rate_limit_mid_run_is_recovered(engines):
+    """Real-world scenario seen in the sample movie (first ~N requests succeed, then 429):
+    used to leave 38% of the film in English; the tail now goes to the fallback engine."""
     engines.google_fail_after = 12
     m = build(TEXTS, engine_mode="google", batch_size=5)
-    untranslated = [t for t in TEXTS if m[t] == t]
-    assert 0 < len(untranslated) < len(TEXTS)
-    assert engines.count("mymemory") == 0
+    assert all(m[t] != t for t in TEXTS)
+    assert engines.count("mymemory") > 0
 
 
 @pytest.mark.xfail(strict=True, reason="H1: there is no way to know which lines failed (no status / exception / count)")
@@ -96,16 +96,8 @@ def test_failures_are_reported(engines):
 
 
 # ---------- request amplification ----------
-def test_one_bad_item_triggers_request_amplification(engines):
-    """One permanently failing line in a batch of 10 makes the whole batch retry 3x and
-    then every item individually: 10 lines cost ~3*k + 10..12 requests instead of 10."""
-    engines.google_fail_texts = {"Line number 5"}
-    build(TEXTS[:10], engine_mode="google", batch_size=10)
-    assert engines.count("google") >= 3 * 6 + 10
-
-
-@pytest.mark.xfail(strict=True, reason="H2: request count should stay close to the number of lines (+ small retry budget)")
 def test_request_budget_with_one_bad_item(engines):
+    """H2 amplification fixed: one bad line no longer re-sends the whole batch 3x (was >= 28 requests)."""
     engines.google_fail_texts = {"Line number 5"}
     build(TEXTS[:10], engine_mode="google", batch_size=10)
     assert engines.count("google") <= 10 + 3
@@ -159,16 +151,10 @@ def test_deepl_without_key_silently_uses_mymemory(engines, monkeypatch):
 
 
 # ---------- concurrency ----------
-def test_single_translator_instance_shared_across_threads(engines):
-    """Characterises H3: one GoogleTranslator object is used by up to 4 threads."""
-    build([f"x{i}" for i in range(80)], engine_mode="google", batch_size=10)
-    google_instances = [i for e, i in engines.instances if e == "google"]
-    assert len(google_instances) == 1
-
-
-def test_race_with_stateful_translator(monkeypatch):
-    """Simulates deep_translator's real pattern (store text in self._url_params, then request).
-    With a shared instance and parallel batches, results get swapped between lines."""
+def test_no_race_with_stateful_translator(monkeypatch):
+    """H3 (fixed): deep_translator stores the text on the instance before requesting; with a
+    shared instance and parallel batches results used to get swapped between lines. Requests
+    are now serialised (semaphore 1 + HTTP lock), so every line keeps its own translation."""
     import translate_srt as TT
 
     class StatefulGoogle:
@@ -188,7 +174,7 @@ def test_race_with_stateful_translator(monkeypatch):
     texts = [f"line-{i}" for i in range(120)]
     m = TT._build_translation_map(texts, target_lang="tr", batch_size=10, mm_workers=4, engine_mode="google")
     swapped = [t for t in texts if m[t] != f"TR<{t}>"]
-    assert swapped, "expected cross-thread mix-ups with a shared stateful translator"
+    assert not swapped
 
 
 # ---------- progress ----------

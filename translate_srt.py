@@ -13,12 +13,28 @@ import csv
 import ctypes
 import importlib
 import subprocess
-import urllib.parse
+import html as html_lib
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None  # type: ignore
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except Exception:
+    BeautifulSoup = None  # type: ignore
 try:
     import srt_clean  # type: ignore
 except Exception:
     srt_clean = None  # type: ignore
-_API_SEM = threading.Semaphore(4)
+# Google HTML scraping is fragile; keep this at 1 to avoid Error 500 pages.
+_API_SEM = threading.Semaphore(1)
+_GOOGLE_HTTP_LOCK = threading.Lock()
+_MYMEMORY_QUOTA_HIT = False
+_GOOGLE_SESSION = None
+_GOOGLE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 # Optional: force Windows title bar dark mode (best effort)
 try:
@@ -174,6 +190,10 @@ def _offer_install_missing_requirements() -> None:
 try:
     from deep_translator import GoogleTranslator, MyMemoryTranslator
     try:
+        from deep_translator.exceptions import TooManyRequests  # type: ignore
+    except Exception:
+        TooManyRequests = None  # type: ignore
+    try:
         # Optional engines; may require API key or base URL
         from deep_translator import DeeplTranslator, LibreTranslator  # type: ignore
     except Exception:
@@ -204,6 +224,10 @@ except Exception as import_error:  # pragma: no cover
     try:
         _install_packages(["deep-translator"])  # attempt auto-install
         from deep_translator import GoogleTranslator, MyMemoryTranslator
+        try:
+            from deep_translator.exceptions import TooManyRequests  # type: ignore
+        except Exception:
+            TooManyRequests = None  # type: ignore
         try:
             from deep_translator import DeeplTranslator, LibreTranslator  # type: ignore
         except Exception:
@@ -489,6 +513,21 @@ def _cli_main() -> None:
         f.writelines(translated)
 
     print(f"Wrote: {output_path}")
+
+    # Report any lines that still look untranslated so failures are visible
+    # instead of silently shipping English text.
+    unresolved = []
+    for i, (src_line, dst_line) in enumerate(zip(lines, translated)):
+        s = src_line.strip("\r\n")
+        d = dst_line.strip("\r\n")
+        if s == "" or is_sequence_number(s) or is_timestamp(s) or is_vtt_meta(s):
+            continue
+        if s == d and re.search(r"[A-Za-z]{2,}", s):
+            unresolved.append((i + 1, s))
+    if unresolved:
+        print(f"Warning: {len(unresolved)} line(s) may still be untranslated:", file=sys.stderr)
+        for ln, txt in unresolved[:50]:
+            print(f"  line {ln}: {txt}", file=sys.stderr)
 
 
 # -------------------- GUI --------------------
@@ -1186,6 +1225,204 @@ def _maybe_open_python_download_once() -> None:
         pass
 
 
+_BAD_TRANSLATION_MARKERS = (
+    "error 500",
+    "server error",
+    "that's an error",
+    "that\u2019s an error",
+    "please try again later",
+    "that's all we know",
+    "that\u2019s all we know",
+    "!!1500",
+    "mymemory warning",
+    "you used all available free translations",
+    "we're sorry",
+    "we\u2019re sorry",
+    "automated queries",
+    "<html",
+    "</html>",
+    "<!doctype",
+)
+
+
+def _is_bad_translation(dst: Optional[str], src: Optional[str] = None) -> bool:
+    if dst is None or not isinstance(dst, str):
+        return True
+    s = dst.strip()
+    if not s:
+        return True
+    low = s.lower()
+    if any(marker in low for marker in _BAD_TRANSLATION_MARKERS):
+        return True
+    if "error" in low and "500" in low:
+        return True
+    return False
+
+
+def _get_google_session():
+    global _GOOGLE_SESSION
+    if requests is None:
+        return None
+    if _GOOGLE_SESSION is None:
+        sess = requests.Session()
+        sess.headers.update({
+            "User-Agent": _GOOGLE_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        _GOOGLE_SESSION = sess
+    return _GOOGLE_SESSION
+
+
+def _extract_google_mobile_result(html_text: str) -> Optional[str]:
+    if not html_text:
+        return None
+    # Note: do NOT run _is_bad_translation() on the raw page here — every
+    # normal translate.google.com/m response is a full HTML document
+    # (starts with "<!doctype html><html ...>"), which would always match
+    # the "<html"/"<!doctype" bad-translation markers and make this
+    # function reject every response, success or failure alike. The
+    # extracted text below is what actually gets validated by callers.
+    if BeautifulSoup is not None:
+        try:
+            soup = BeautifulSoup(html_text, "html.parser")
+            el = soup.find("div", class_="result-container") or soup.find("div", class_="t0")
+            if el is not None:
+                out = (el.get_text() or "").strip()
+                return html_lib.unescape(out) if out else None
+        except Exception:
+            pass
+    m = re.search(r'class="result-container"[^>]*>([^<]+)', html_text)
+    if m:
+        return html_lib.unescape(m.group(1)).strip()
+    return None
+
+
+def _google_translate_one_http(text: str, target_lang: str, attempts: int = 6) -> Optional[str]:
+    sess = _get_google_session()
+    if sess is None or not text or not str(text).strip():
+        return None
+    src = str(text).strip()
+    last_status = None
+    for attempt in range(attempts):
+        try:
+            with _GOOGLE_HTTP_LOCK:
+                resp = sess.get(
+                    "https://translate.google.com/m",
+                    params={"sl": "auto", "tl": target_lang, "q": src, "hl": "en"},
+                    timeout=25,
+                )
+                last_status = resp.status_code
+                body = resp.text or ""
+            if last_status == 429:
+                time.sleep(min(20.0, 2.5 * (attempt + 1)))
+                continue
+            if last_status != 200:
+                time.sleep(min(15.0, 1.2 * (attempt + 1)))
+                continue
+            out = _extract_google_mobile_result(body)
+            if out and not _is_bad_translation(out, src):
+                return out
+            # A 200 with a bad/blocked body (Google's soft rate-limit page)
+            # is transient — back off longer than a plain retry so the
+            # block window has a chance to clear.
+            time.sleep(min(15.0, 1.5 * (attempt + 1)))
+            continue
+        except Exception:
+            pass
+        time.sleep(min(10.0, 0.8 * (attempt + 1)))
+    return None
+
+
+def _mymemory_translate_one_http(text: str, target_lang: str) -> Optional[str]:
+    global _MYMEMORY_QUOTA_HIT
+    if _MYMEMORY_QUOTA_HIT or requests is None:
+        return None
+    src = (text or "").strip()
+    if not src:
+        return None
+    target_code = _map_lang_for_mymemory(target_lang)
+    try:
+        resp = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": src[:450], "langpair": f"en|{target_code.split('-')[0]}"},
+            headers={"User-Agent": _GOOGLE_UA},
+            timeout=20,
+        )
+        data = resp.json() if resp.content else {}
+    except Exception:
+        return None
+    blob = json.dumps(data, ensure_ascii=False).lower() if data else ""
+    if resp.status_code == 429 or "mymemory warning" in blob or "you used all available" in blob:
+        _MYMEMORY_QUOTA_HIT = True
+        return None
+    try:
+        out = (data.get("responseData") or {}).get("translatedText")
+    except Exception:
+        out = None
+    if out and not _is_bad_translation(out, src):
+        return str(out).strip()
+    return None
+
+
+def _mm_translate_via_client(mymemory_obj, text: str) -> Optional[str]:
+    """Translate one text with a deep_translator MyMemoryTranslator instance.
+
+    Bails out immediately once the shared daily quota is known to be
+    exhausted instead of burning several seconds of retries per line on a
+    call that cannot possibly succeed.
+    """
+    global _MYMEMORY_QUOTA_HIT
+    if _MYMEMORY_QUOTA_HIT:
+        return None
+    for attempt in range(5):
+        try:
+            _API_SEM.acquire()
+            try:
+                out = mymemory_obj.translate(text)
+            finally:
+                _API_SEM.release()
+            if not _is_bad_translation(out, text):
+                return out
+            return None
+        except Exception as e:
+            if TooManyRequests is not None and isinstance(e, TooManyRequests):
+                _MYMEMORY_QUOTA_HIT = True
+                return None
+            if "mymemory" in str(e).lower() and "available" in str(e).lower():
+                _MYMEMORY_QUOTA_HIT = True
+                return None
+        time.sleep(0.6 * (attempt + 1))
+    return None
+
+
+def _google_translate_batch_safe(
+    google,
+    texts_batch: List[str],
+    cancel_check: Optional[Callable[[], bool]] = None,
+    target_lang: str = "tr",
+) -> List[Optional[str]]:
+    results: List[Optional[str]] = [None] * len(texts_batch)
+    if not texts_batch:
+        return results
+    for idx, src in enumerate(texts_batch):
+        if cancel_check and cancel_check():
+            break
+        out = _google_translate_one_http(src, target_lang)
+        if out is None and google is not None:
+            try:
+                one = google.translate(src)
+                if not _is_bad_translation(one, src):
+                    out = one
+            except Exception:
+                out = None
+        if out is None:
+            out = _mymemory_translate_one_http(src, target_lang)
+        results[idx] = out
+        time.sleep(0.12)
+    return results
+
+
 def _build_translation_map(
     texts: List[str],
     target_lang: str,
@@ -1196,17 +1433,6 @@ def _build_translation_map(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, str]:
-    def _is_invalid_translation(t: Optional[str]) -> bool:
-        if not isinstance(t, str): return False
-        lower_t = t.lower()
-        if "error 500" in lower_t: return True
-        if "server error" in lower_t: return True
-        if "that’s an error" in lower_t: return True
-        if "that's an error" in lower_t: return True
-        if "too many requests" in lower_t: return True
-        if "mymemory warning" in lower_t: return True
-        return False
-
     translated_map: Dict[str, str] = {}
     unique_texts = list(dict.fromkeys([t for t in texts if t is not None]))
     # Word counts for better progress metrics
@@ -1231,141 +1457,124 @@ def _build_translation_map(
     google = GoogleTranslator(source="auto", target=target_lang) if use_google else None
     mymemory = None
 
+    # Helper: primary engine batch call with global throttling
     def _primary_translate_batch(engine_name: str, texts_batch: List[str]) -> Optional[List[str]]:
-        if not texts_batch:
-            return []
-        
-        # We will do up to 3 retries for the batch. If the batch still fails, we will NOT return None,
-        # but rather we will return a list with None for failed items, OR we will fall back to per-item translation.
-        for attempt in range(3):
+        try:
+            if cancel_check and cancel_check():
+                return [t for t in texts_batch]
+            _API_SEM.acquire()
             try:
-                if cancel_check and cancel_check():
-                    return [t for t in texts_batch]
-                _API_SEM.acquire()
-                try:
-                    res = None
-                    if engine_name == "google" and google is not None:
-                        res = google.translate_batch(texts_batch)
-                    elif engine_name == "deepl" and 'DeeplTranslator' in globals() and DeeplTranslator is not None and _DEEPL_API_KEY:
+                if engine_name == "google" and google is not None:
+                    safe = _google_translate_batch_safe(google, texts_batch, cancel_check)
+                    if any(v is not None for v in safe):
+                        return safe  # type: ignore[return-value]
+                    return None
+                if engine_name == "deepl" and 'DeeplTranslator' in globals() and DeeplTranslator is not None and _DEEPL_API_KEY:
+                    try:
+                        deepl = DeeplTranslator(api_key=_DEEPL_API_KEY, source="auto", target=target_lang)  # type: ignore
+                    except TypeError:
+                        # Older signatures
+                        deepl = DeeplTranslator(_DEEPL_API_KEY, source="auto", target=target_lang)  # type: ignore
+                    # Some versions support translate_batch; fallback to per-item
+                    if hasattr(deepl, "translate_batch"):
+                        return deepl.translate_batch(texts_batch)  # type: ignore
+                    return [deepl.translate(t) for t in texts_batch]  # type: ignore
+                if engine_name == "libre" and 'LibreTranslator' in globals() and LibreTranslator is not None:
+                    base_url = _LIBRE_URL or "https://libretranslate.com/"
+                    try:
+                        libre = LibreTranslator(source="auto", target=target_lang, api_url=base_url, api_key=_LIBRE_API_KEY)  # type: ignore
+                    except TypeError:
                         try:
-                            deepl = DeeplTranslator(api_key=_DEEPL_API_KEY, source="auto", target=target_lang)  # type: ignore
+                            libre = LibreTranslator(source="auto", target=target_lang, base_url=base_url)  # type: ignore
                         except TypeError:
-                            deepl = DeeplTranslator(_DEEPL_API_KEY, source="auto", target=target_lang)  # type: ignore
-                        if hasattr(deepl, "translate_batch"):
-                            res = deepl.translate_batch(texts_batch)  # type: ignore
-                        else:
-                            res = [deepl.translate(t) for t in texts_batch]  # type: ignore
-                    elif engine_name == "libre" and 'LibreTranslator' in globals() and LibreTranslator is not None:
-                        base_url = _LIBRE_URL or "https://libretranslate.com/"
-                        try:
-                            libre = LibreTranslator(source="auto", target=target_lang, api_url=base_url, api_key=_LIBRE_API_KEY)  # type: ignore
-                        except TypeError:
+                            libre = LibreTranslator(source="auto", target=target_lang)  # type: ignore
+                    if hasattr(libre, "translate_batch"):
+                        return libre.translate_batch(texts_batch)  # type: ignore
+                    return [libre.translate(t) for t in texts_batch]  # type: ignore
+                if engine_name == "deepl_web":
+                    # Best-effort Selenium automation of DeepL web. Slow and fragile.
+                    if webdriver is None or WebDriverWait is None or (ChromeOptions is None and ChromeDriverManager is None):
+                        return None
+                    try:
+                        # Initialize Chrome driver
+                        options = ChromeOptions() if ChromeOptions is not None else None
+                        if options is not None:
                             try:
-                                libre = LibreTranslator(source="auto", target=target_lang, base_url=base_url)  # type: ignore
-                            except TypeError:
-                                libre = LibreTranslator(source="auto", target=target_lang)  # type: ignore
-                        if hasattr(libre, "translate_batch"):
-                            res = libre.translate_batch(texts_batch)  # type: ignore
-                        else:
-                            res = [libre.translate(t) for t in texts_batch]  # type: ignore
-                    elif engine_name == "deepl_web":
-                        # Best-effort Selenium automation of DeepL web. Slow and fragile.
-                        if webdriver is None or WebDriverWait is None or (ChromeOptions is None and ChromeDriverManager is None):
-                            return None
-                        try:
-                            # Initialize Chrome driver
-                            options = ChromeOptions() if ChromeOptions is not None else None
-                            if options is not None:
-                                try:
-                                    options.add_argument("--headless=new")
-                                except Exception:
-                                    options.add_argument("--headless")
-                                options.add_argument("--disable-gpu")
-                                options.add_argument("--no-sandbox")
-                                options.add_argument("--lang=en-US,en")
-                                options.add_argument("--disable-dev-shm-usage")
-                            try:
-                                if ChromeDriverManager is not None:
-                                    driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)  # type: ignore
-                                else:
-                                    driver = webdriver.Chrome(options=options)  # type: ignore
+                                options.add_argument("--headless=new")
                             except Exception:
-                                # Fallback default init
-                                driver = webdriver.Chrome()  # type: ignore
-                            results_web: List[str] = []
-                            try:
-                                base_url_web = "https://www.deepl.com/translator"
-                                driver.get(base_url_web)
-                                # Try to accept cookies quietly
-                                try:
-                                    cookie_btn = WebDriverWait(driver, 3).until(
-                                        EC.element_to_be_clickable((By.CSS_SELECTOR, '[data-testid="cookie-banner-strict-accept-selected"]'))
-                                    )
-                                    cookie_btn.click()
-                                except Exception:
-                                    pass
-
-                                for txt in texts_batch:
-                                    if cancel_check and cancel_check():
-                                        break
-                                    if not txt.strip():
-                                        results_web.append(txt)
-                                        continue
-                                    driver.get("about:blank")
-                                    tgt = target_lang.upper()
-                                    if tgt == "EN": tgt = "EN-US"
-                                    if tgt == "PT": tgt = "PT-BR"
-                                    url = f"https://www.deepl.com/translator#auto/{urllib.parse.quote(tgt)}/{urllib.parse.quote(txt[:4500])}"
-                                    driver.get(url)
-                                    try:
-                                        out_elem = WebDriverWait(driver, 10).until(
-                                            EC.presence_of_element_located((By.CSS_SELECTOR, 'd-textarea[aria-labelledby="translation-results-heading"]'))
-                                        )
-                                        time.sleep(1)
-                                        results_web.append(out_elem.text or txt)
-                                    except Exception:
-                                        results_web.append(txt)
-                            finally:
-                                driver.quit()
-                            res = results_web
-                        except Exception:
-                            res = None
-
-                    if isinstance(res, list) and len(res) == len(texts_batch):
-                        # Filter invalid here so we can retry!
-                        if any(_is_invalid_translation(r) for r in res):
-                            raise ValueError("Invalid translation response from primary engine")
-                        return res
-                finally:
-                    _API_SEM.release()
-            except Exception:
-                time.sleep(1.0 * (attempt + 1))
-        
-        # If batch mode failed, we can fallback to per-item translation for Google Translator to salvage it
-        # This will prevent the whole batch of 100 from being skipped just because 1 failed or rate limited
-        salvaged = []
-        if engine_name == "google" and google is not None:
-            for t in texts_batch:
-                if cancel_check and cancel_check():
-                    salvaged.append(t)
-                    continue
-                _API_SEM.acquire()
-                try:
-                    for _ in range(2):
+                                options.add_argument("--headless")
+                            options.add_argument("--disable-gpu")
+                            options.add_argument("--no-sandbox")
+                            options.add_argument("--lang=en-US,en")
+                            options.add_argument("--disable-dev-shm-usage")
                         try:
-                            # Try translating this single item
-                            tmp = google.translate(t)
-                            if not _is_invalid_translation(tmp):
-                                salvaged.append(tmp)
-                                break
+                            if ChromeDriverManager is not None:
+                                driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)  # type: ignore
+                            else:
+                                driver = webdriver.Chrome(options=options)  # type: ignore
                         except Exception:
-                            time.sleep(0.5)
-                    else:
-                        salvaged.append(t)
-                finally:
-                    _API_SEM.release()
-            return salvaged
-            
+                            # Fallback default init
+                            driver = webdriver.Chrome()  # type: ignore
+                        results: List[str] = []
+                        try:
+                            base_url = "https://www.deepl.com/translator"
+                            driver.get(base_url)
+                            # Try to accept cookies quietly
+                            try:
+                                WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                            except Exception:
+                                pass
+                            # Prepare language mapping (simple)
+                            tgt = target_lang
+                            # Process each text sequentially to avoid mixing outputs
+                            for txt in texts_batch:
+                                if cancel_check and cancel_check():
+                                    break
+                                # Navigate via URL fragment with encoded text; more reliable than typing
+                                try:
+                                    import urllib.parse as _up
+                                    url = f"https://www.deepl.com/translator#auto/{_up.quote(tgt)}/{_up.quote(txt[:4500])}"
+                                    driver.get(url)
+                                except Exception:
+                                    driver.get(base_url)
+                                # Wait for output to appear
+                                out_text = None
+                                try:
+                                    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                                    # Try multiple output selectors
+                                    selectors = [
+                                        'div[dl-test="translator-target"]',
+                                        'textarea[dl-test="translator-target-input"]',
+                                        'div.lmt__translations_as_text',
+                                        'div.lmt__target_textarea',
+                                        'div[aria-live="polite"]',
+                                    ]
+                                    for sel in selectors:
+                                        try:
+                                            el = WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                                            txt_out = el.text.strip()
+                                            if not txt_out and hasattr(el, 'get_attribute'):
+                                                txt_out = (el.get_attribute('value') or '').strip()
+                                            if txt_out:
+                                                out_text = txt_out
+                                                break
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    out_text = None
+                                results.append(out_text if out_text else txt)
+                        finally:
+                            try:
+                                driver.quit()
+                            except Exception:
+                                pass
+                        return results
+                    except Exception:
+                        return None
+            finally:
+                _API_SEM.release()
+        except Exception:
+            return None
         return None
 
     # Branch 1: MyMemory-first (auto + mmemory_first) – keep original logic with small tweaks
@@ -1375,19 +1584,8 @@ def _build_translation_map(
             mymemory = MyMemoryTranslator(source="en-GB", target=target_code)
 
         def _mm_translate_one(text: str) -> str:
-            for attempt in range(5):
-                try:
-                    _API_SEM.acquire()
-                    try:
-                        res = mymemory.translate(text)
-                        if _is_invalid_translation(res):
-                            raise ValueError("Invalid translation response")
-                        return res
-                    finally:
-                        _API_SEM.release()
-                except Exception:
-                    time.sleep(0.6 * (attempt + 1))
-            return text
+            out = _mm_translate_via_client(mymemory, text)
+            return out if out is not None else text
 
         # MyMemory concurrently
         with ThreadPoolExecutor(max_workers=max(1, min(mm_workers, 16))) as pool:
@@ -1417,9 +1615,10 @@ def _build_translation_map(
                     for fut in as_completed(futs):
                         b = futs[fut]
                         res = fut.result()
-                        if isinstance(res, list) and not any(_is_invalid_translation(r) for r in res):
+                        if isinstance(res, list):
                             for src, dst in zip(b, res):
-                                translated_map[src] = dst if dst is not None else src
+                                if dst is not None and not _is_bad_translation(dst, src):
+                                    translated_map[src] = dst
                         processed_words += sum(word_count_map.get(s, 0) for s in b)
                         if progress_callback:
                             try:
@@ -1441,15 +1640,16 @@ def _build_translation_map(
             for fut in as_completed(futs):
                 b = futs[fut]
                 res = fut.result()
-                if isinstance(res, list) and len(res) == len(b) and not any(_is_invalid_translation(r) for r in res):
+                if isinstance(res, list) and len(res) == len(b):
                     with lock:
                         for src, dst in zip(b, res):
-                            translated_map[src] = dst if dst is not None else src
+                            if dst is not None and not _is_bad_translation(dst, src):
+                                translated_map[src] = dst
+                            else:
+                                unresolved.append(src)
                 else:
-                    # If primary fails, retry individually to salvage the batch
-                    # This helps translate completely without failing the whole batch
-                    with lock:
-                        unresolved.extend(b)
+                    # Mark this batch for fallback
+                    unresolved.extend(b)
                 # Count only items that we actually received a translation for
                 if isinstance(res, list) and len(res) == len(b):
                     processed_words += sum(word_count_map.get(s, 0) for s in b)
@@ -1467,19 +1667,8 @@ def _build_translation_map(
             mymemory = MyMemoryTranslator(source="en-GB", target=target_code)
 
         def _mm_translate_one_fb(text: str) -> str:
-            for attempt in range(5):
-                try:
-                    _API_SEM.acquire()
-                    try:
-                        res = mymemory.translate(text)
-                        if _is_invalid_translation(res):
-                            raise ValueError("Invalid translation response")
-                        return res
-                    finally:
-                        _API_SEM.release()
-                except Exception:
-                    time.sleep(0.6 * (attempt + 1))
-            return text
+            out = _mm_translate_via_client(mymemory, text)
+            return out if out is not None else text
 
         with ThreadPoolExecutor(max_workers=max(1, min(mm_workers, 16))) as pool:
             futures = {pool.submit(_mm_translate_one_fb, t): t for t in remaining}
@@ -1496,9 +1685,40 @@ def _build_translation_map(
                     except Exception:
                         pass
 
+    # Recovery pass: some lines fail only because of a transient blip (a
+    # momentary block, a bad response). Rather than silently leaving the
+    # original English text in place, retry those a few more times with
+    # backoff before giving up for good.
+    def _looks_untranslated(src: str) -> bool:
+        cur = translated_map.get(src)
+        if cur is None or _is_bad_translation(cur, src):
+            return True
+        return cur.strip() == src.strip() and bool(re.search(r"[A-Za-z]{2,}", src))
+
+    pending = [t for t in unique_texts if _looks_untranslated(t)]
+    max_rounds = 6
+    for round_no in range(max_rounds):
+        if not pending or (cancel_check and cancel_check()):
+            break
+        time.sleep(min(20.0, 2.0 * (round_no + 1)))
+        still_pending: List[str] = []
+        for src in pending:
+            if cancel_check and cancel_check():
+                still_pending.append(src)
+                continue
+            out = _google_translate_one_http(src, target_lang, attempts=3)
+            if out is None and not _MYMEMORY_QUOTA_HIT:
+                out = _mymemory_translate_one_http(src, target_lang)
+            if out and not _is_bad_translation(out, src):
+                translated_map[src] = out
+            else:
+                still_pending.append(src)
+        pending = still_pending
+
     # Finalize: ensure every unique text has a mapping
     for t in unique_texts:
-        if t not in translated_map:
+        cur = translated_map.get(t)
+        if cur is None or _is_bad_translation(cur, t):
             translated_map[t] = t
     return translated_map
 
@@ -2339,11 +2559,15 @@ class TranslatorGUI:
         except Exception:
             pass
         self.root.deiconify()
+        # Started via pyw/run_app.bat the process is not the foreground app, so Windows would open
+        # the window *behind* other windows: raise it briefly as topmost, then release.
+        self.root.attributes("-topmost", True)
         self.root.lift()
         try:
             self.root.focus_force()
         except Exception:
             pass
+        self.root.after(400, lambda: self.root.attributes("-topmost", False))
 
     def fix_window_focus(self):  # kept for compatibility; _show_window does this once
         pass
@@ -4904,8 +5128,27 @@ if __name__ == "__main__":
         _offer_install_missing_requirements()
         _cli_main()
     except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        traceback.print_exc()
+        # Started without a console (pyw / run_app.bat): stderr goes nowhere, so also write a
+        # log next to the app and show a message box instead of failing silently.
+        details = traceback.format_exc()
+        try:
+            print(f"ERROR: {e}\n{details}", file=sys.stderr)
+        except Exception:
+            pass
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "subtitle_pro_error.log")
+        try:
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n" + details + "\n")
+        except Exception:
+            pass
+        try:
+            if tk is not None:
+                _r = tk.Tk()
+                _r.withdraw()
+                messagebox.showerror("Subtitle PRO", f"{e}\n\n{log_path}")
+                _r.destroy()
+        except Exception:
+            pass
         sys.exit(1)
 
 
