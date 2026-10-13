@@ -15,6 +15,12 @@ py -m venv .venv
    Aynı hatanın "karakterizasyon" testi (bugünkü yanlış davranışı doğrulayan) varsa onu silin veya tersine çevirin.
 4. `KNOWN_ISSUES.md`'de satırı ✅ ile işaretleyin, commit mesajında numarayı belirtin: `fix(H1): ...`.
 
+## Arayüz metni eklerken / çeviri düzeltirken
+1. Metni kodda `self._tr("English text")` ile kullanın (değişkenle geçiyorsa `UI_EXTRA_KEYS` listesine ekleyin). Kısa ve belirsiz kelimelerden kaçının: "Start selected" değil "Translate selected files".
+2. `python tools/i18n_sync.py --fill` → yeni anahtar 36 dile çevrilir, `tools/i18n_overrides.json` en son uygulanır.
+3. `python tools/ui_audit.py --langs tr,de,ja` ile çevrilmemiş/kırpılan metin kalmadığını kontrol edin; `pytest tests/test_ui_i18n.py`.
+4. Ana dilinizde yanlış bir terim görürseniz düzeltmeyi `tools/i18n_overrides.json`'a ekleyin.
+
 ## Kurallar
 - Testler ağa çıkmamalı; `tests/conftest.py` içindeki `engines` fixture'ını kullanın. Canlı testler `@pytest.mark.network`.
 - Worker thread'den Tk nesnelerine dokunmayın (H4).

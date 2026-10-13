@@ -179,12 +179,13 @@ def test_mymemory_mapping_unknown_is_not_turkish(code):
     assert T._map_lang_for_mymemory(code) != "tr-TR"
 
 
-@pytest.mark.xfail(strict=True, reason="H6: GoogleTranslator.get_supported_languages is called on the class -> TypeError -> 37-language fallback")
-def test_supported_languages_full_list():
+def test_supported_languages_full_list():  # H6 (fixed)
     assert len(T._get_supported_langs("en")) > 100
 
 
-@pytest.mark.xfail(strict=True, reason="H7: Turkish fallback map has no 'Turkish' key, so the GUI default target becomes the first alphabetical entry ('Almanca')")
-def test_turkish_fallback_contains_default_name():
+def test_supported_languages_have_proper_names():
+    """H6/H7 (fixed): names are 'Turkish', 'Chinese (Simplified)', not codes or 'Af'."""
     langs = T._get_supported_langs("tr")
-    assert "Turkish" in langs or langs.get(sorted(langs)[0]) == "tr"
+    assert langs.get("Turkish") == "tr"
+    assert langs.get("Chinese (Simplified)") == "zh-CN"
+    assert all(len(name) > 2 for name in langs)

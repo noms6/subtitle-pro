@@ -30,16 +30,33 @@ Linux'ta GUI testleri için sanal ekran: `xvfb-run -a python -m pytest`.
 | `test_translate_lines.py` | Satır yapısının korunması, CRLF, tekilleştirme, etiketler, satır kırma, Markdown/CSV | 17 |
 | `test_engine.py` | Motor yönlendirme, 429, fallback, istek sayısı, thread yarışı, ilerleme, iptal | 28 |
 | `test_formats.py` | TXT, DOCX (gövde/tablo/üstbilgi/köprü), PDF (Türkçe glif, kelime bölme), CLI | 19 |
-| `test_gui.py` | Kurulum, uçtan uca çeviri, paralel dosya, çıktı klasörü, hata diyaloğu thread'i, iptal, ayarlar, tema, kuyruk, sözlük | 36 |
+| `test_gui.py` | Kurulum, uçtan uca çeviri, paralel dosya, çıktı klasörü, worker↔Tk thread ayrımı, iptal, ayarlar, tema, kuyruk, sözlük | 36 |
+| `test_ui_i18n.py` | 37 dil paketi, emoji önek araması, önbellek, canlı dil değişiminde tüm görünür metinler, **ikincil pencereler**, kırpılma, kaydırma, log, tema, menü, **tek seferde açılış** | 152 |
 | `test_network.py` | Canlı Google/MyMemory, birleşik istek kavram kanıtı, küçük dosya | 4 (varsayılan kapalı) |
 
 ## Son Sonuç (2026-10-13, Windows 10, Python 3.10.11)
 
 ```
-94 passed, 59 xfailed, 2 xpassed, 4 deselected in 9.8s
+264 passed, 42 xfailed, 4 deselected in 17.7s      (ui-overhaul dalı, 2. tur)
+252 passed, 42 xfailed, 4 deselected in 13.5s      (ui-overhaul dalı, 1. tur)
+94 passed, 59 xfailed, 2 xpassed, 4 deselected     (ilk sürüm, main)
 ```
-- **59 xfailed** = belgelenmiş, henüz düzeltilmemiş hatalar.
-- **2 xpassed** = H27 yarış testi (`strict=False`); 5 denemenin bazılarında hata mesajı gösteriliyor, bazılarında kayboluyor. Beklenen davranış.
+- **42 xfailed** = belgelenmiş, henüz düzeltilmemiş hatalar (çoğu çeviri motoru: H1, H2, H3, H12…).
+- Arayüz turunda 17 xfail XPASS verdi ve normal teste çevrildi (H4, H5, H6, H7, H10, H11, H27, H36, H38).
+
+## Arayüz denetimi (`tools/ui_audit.py`)
+
+Gerçek GUI, 37 dilin her birine geçirilip tüm görünür widget metinleri toplanır.
+
+| Ölçüm (dil başına) | Önce | Sonra |
+|---|---|---|
+| İngilizce kalan görünür metin (56 metinden) | 22–45 (16 dilde 45) | 6–7 (yalnızca marka adları) |
+| Yanlış alfabe (ör. Japonca pakette Korece) | 5 | 0 |
+| Kırpılan widget | 2 | 0 |
+| Dil değişiminde JSON okuma | 40 | 0 |
+| Dil değişim süresi | ~220 ms | ~100 ms |
+| Ana sayfa içerik yüksekliği (1280×720) | 1.370 px (tekerlek çalışmıyor) | 886 px (tekerlek çalışıyor) |
+| `_log` × 2.000 | 5.6 sn | 0.51 sn |
 
 ### Canlı servis testleri
 | Test | Sonuç | Not |

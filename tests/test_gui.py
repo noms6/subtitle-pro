@@ -112,18 +112,18 @@ def test_title_and_queue_widgets_exist(app):
     assert hasattr(app, "tree") and hasattr(app, "tb_start")
 
 
-@pytest.mark.xfail(strict=True, reason="H5: _rebuild_target_lang_names is nested inside a module-level function, not a method")
 def test_rebuild_target_lang_names_is_method(app):
+    """H5 (fixed): was nested inside a module-level function."""
     assert hasattr(app, "_rebuild_target_lang_names")
 
 
-def test_target_lang_map_is_always_empty(app):
-    """Consequence of H5: the localized target map is never built."""
-    assert app.target_lang_map == {}
+def test_target_lang_map_is_built(app):
+    app._rebuild_target_lang_names()
+    assert len(app.target_lang_map) > 100
 
 
-@pytest.mark.xfail(strict=True, reason="H6: only the 37-language fallback list is offered")
 def test_many_target_languages(app):
+    """H6 (fixed): full Google list instead of the 37-language fallback."""
     assert len(app.lang_map) > 100
 
 
@@ -139,32 +139,34 @@ def test_e2e_srt_translation(clean, engines, tmp_path):
     text = out.read_bytes().decode("utf-8-sig")
     assert "TR<Stop! Stop the bus!>" in text
     assert "00:00:01,000 --> 00:00:02,500" in text
-    assert status_of(app, p) == "Tamamlandı"
+    assert status_of(app, p) == app._tr("Completed")
     assert app._callback_errors == []
 
 
 def test_e2e_rate_limited_file_marked_done_but_untranslated(clean, engines, tmp_path):
-    """Characterises H1 at user level: 429 everywhere -> file says 'Tamamlandı', content is English."""
+    """Remaining H1 at user level: every engine fails -> file still says 'Completed', content is English."""
     engines.google_always_fail = True
+    engines.mm_always_fail = True
     app = clean
     p = make_srt(tmp_path)
     app._add_file(p)
     app._start()
     pump(app)
     text = (tmp_path / "movie.en.tr.srt").read_bytes().decode("utf-8-sig")
-    assert "Stop! Stop the bus!" in text and "TR<" not in text
-    assert status_of(app, p) == "Tamamlandı"
+    assert "Stop! Stop the bus!" in text and "TR<" not in text and "MM<" not in text
+    assert status_of(app, p) == app._tr("Completed")
 
 
 @pytest.mark.xfail(strict=True, reason="H1: a file whose lines failed must not be reported as 'Tamamlandı'")
 def test_e2e_rate_limited_file_reported(clean, engines, tmp_path):
     engines.google_always_fail = True
+    engines.mm_always_fail = True
     app = clean
     p = make_srt(tmp_path)
     app._add_file(p)
     app._start()
     pump(app)
-    assert status_of(app, p) != "Tamamlandı"
+    assert status_of(app, p) != app._tr("Completed")
 
 
 def test_e2e_parallel_files(clean, engines, tmp_path):
@@ -193,8 +195,8 @@ def test_e2e_output_directory(clean, engines, tmp_path):
     assert (outdir / "movie.en.tr.srt").exists()
 
 
-@pytest.mark.xfail(strict=True, reason="H11: 'skip same language' uses bool(BooleanVar) which is always True, so unticking it has no effect")
-def test_skip_same_language_can_be_disabled(clean, engines, tmp_path, monkeypatch):
+def test_skip_same_language_can_be_disabled(  # H11 (fixed)
+        clean, engines, tmp_path, monkeypatch):
     monkeypatch.setattr(T, "detect_language", lambda s: "tr")
     app = clean
     p = make_srt(tmp_path, content="1\n00:00:01,000 --> 00:00:02,000\nÇok güzel bir gün\n")
@@ -205,19 +207,8 @@ def test_skip_same_language_can_be_disabled(clean, engines, tmp_path, monkeypatc
     assert (tmp_path / "movie.en.tr.srt").exists()
 
 
-def test_error_dialog_requested_from_worker_thread(clean, engines, tmp_path, monkeypatch):
-    """Characterises H4: the Tk error dialog is opened from the worker thread."""
-    monkeypatch.setattr(T, "translate_lines", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    app = clean
-    p = make_srt(tmp_path)
-    app._add_file(p)
-    app._start()
-    pump(app)
-    assert app._dialog_threads and app._dialog_threads[0] != threading.get_ident()
-
-
-@pytest.mark.xfail(strict=True, reason="H4: Tk dialogs must be created on the main thread")
-def test_error_dialog_on_main_thread(clean, engines, tmp_path, monkeypatch):
+def test_error_dialog_on_main_thread(  # H4 (fixed): worker hands the dialog to the Tk thread
+        clean, engines, tmp_path, monkeypatch):
     monkeypatch.setattr(T, "translate_lines", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     app = clean
     app._add_file(make_srt(tmp_path))
@@ -226,20 +217,12 @@ def test_error_dialog_on_main_thread(clean, engines, tmp_path, monkeypatch):
     assert app._dialog_threads == [threading.get_ident()]
 
 
-def test_fatal_error_handler_closes_over_deleted_exception():
-    """H27: `except Exception as e: root.after(0, lambda: ...{e})` — Python deletes `e` when the
-    except block ends, so the lambda raises NameError unless Tk happens to run it first (race)."""
-    import inspect
-    src = inspect.getsource(T.TranslatorGUI._start)
-    assert 'lambda: messagebox.showerror("Hata", f"Çeviri başarısız:\\n{e}")' in src
-
-
-@pytest.mark.xfail(strict=False, reason="H27 (race): fatal error message is sometimes replaced by a NameError in the Tk callback")
-@pytest.mark.parametrize("attempt", range(5))
+@pytest.mark.parametrize("attempt", range(5))  # H27 (fixed): used to lose the message in ~half of runs
 def test_fatal_error_is_shown_to_user(clean, engines, tmp_path, monkeypatch, attempt):
     app = clean
     app._add_file(make_srt(tmp_path))
-    monkeypatch.setattr(app, "_save_settings", lambda: (_ for _ in ()).throw(RuntimeError("disk full")))
+    # fail inside the worker, outside per-file handling (first thing _run does is log the start)
+    monkeypatch.setattr(app, "_log", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
     app._start()
     pump(app)
     assert app._showerror_calls and not app._callback_errors
@@ -259,11 +242,10 @@ def test_cancel_does_not_write_partial_file(clean, engines, tmp_path, monkeypatc
     app.batch_size_var.set(10)
     app._start()
     pump(app)
-    assert not (tmp_path / "movie.en.tr.srt").exists() or status_of(app, p) != "Tamamlandı"
+    assert not (tmp_path / "movie.en.tr.srt").exists() or status_of(app, p) != app._tr("Completed")
 
 
 # ---------- settings ----------
-@pytest.mark.xfail(strict=True, reason="H10: _save_settings rewrites settings.json and drops deepl_api_key / libre_url / libre_api_key")
 def test_save_settings_preserves_api_keys(app):
     with open(T._SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump({"deepl_api_key": "abc:fx", "libre_url": "http://localhost:5000"}, f)
@@ -272,7 +254,6 @@ def test_save_settings_preserves_api_keys(app):
     assert cfg.get("deepl_api_key") == "abc:fx"
 
 
-@pytest.mark.xfail(strict=True, reason="H10: engine / priority / dictionary / pdf mode / skip-same-language are not persisted")
 @pytest.mark.parametrize("key", ["engine", "auto_priority", "dict_mode", "pdf_mode", "skip_same_lang"])
 def test_settings_persist_all_options(app, key):
     app._save_settings()
@@ -280,16 +261,21 @@ def test_settings_persist_all_options(app, key):
     assert key in cfg
 
 
-@pytest.mark.xfail(strict=True, reason="H38: theme is applied in _build_ui before _load_settings runs, so a saved dark theme is lost on every launch")
 def test_saved_dark_theme_applied_on_start(app, tmp_path, monkeypatch):
+    """H38 (fixed): __init__ now calls _apply_loaded_settings after _load_settings."""
     s = tmp_path / "s.json"
     s.write_text(json.dumps({"dark": True}), encoding="utf-8")
     monkeypatch.setattr(T, "_SETTINGS_FILE", str(s))
     app.dark_mode_var.set(False)
     app.theme_var.set("light")
-    # Re-run the same start-up order as __init__: build-time theme, then settings load.
     app._load_settings()
-    assert app.theme_var.get() == "dark"
+    app._apply_loaded_settings()
+    try:
+        assert app.theme_var.get() == "dark"
+        assert app.cmb_theme.current() == 1
+    finally:
+        app.dark_mode_var.set(False)
+        app._apply_loaded_settings()
 
 
 def test_settings_roundtrip_basic(app):
@@ -319,7 +305,6 @@ def test_add_file_filters(clean, tmp_path):
     assert app.files == [os.path.normpath(good)]
 
 
-@pytest.mark.xfail(strict=True, reason="H36: _clear_files leaves stale entries in item_to_path")
 def test_clear_files_clears_reverse_map(clean, tmp_path):
     app = clean
     app._add_file(make_srt(tmp_path))
@@ -362,3 +347,20 @@ def test_load_custom_dict_csv_and_bad_json(app, tmp_path):
 @pytest.mark.xfail(strict=True, reason="H37: preview language hint always reports 'auto' (deep_translator never updates .source)")
 def test_language_hint(app, engines):
     assert app._detect_language_hint("Bonjour tout le monde") not in ("auto", "?")
+
+
+def test_worker_never_calls_tk_directly(clean, engines, tmp_path, monkeypatch):
+    """H4 (fixed): every UI update from the worker goes through the queue drained on the Tk thread."""
+    app = clean
+    calls = []
+    real_after = app.root.after
+
+    def spy_after(ms, fn=None, *args):
+        calls.append(threading.get_ident())
+        return real_after(ms, fn, *args) if fn else real_after(ms)
+    monkeypatch.setattr(app.root, "after", spy_after)
+    app._add_file(make_srt(tmp_path))
+    app._start()
+    pump(app)
+    main = threading.get_ident()
+    assert calls and all(t == main for t in calls)
