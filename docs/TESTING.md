@@ -37,6 +37,7 @@ Linux'ta GUI testleri için sanal ekran: `xvfb-run -a python -m pytest`.
 ## Son Sonuç (2026-10-13, Windows 10, Python 3.10.11)
 
 ```
+270 passed, 40 xfailed, 4 deselected in 38.7s      (main, hızlı motor + 20 dilli README sonrası)
 264 passed, 42 xfailed, 4 deselected in 17.7s      (ui-overhaul dalı, 2. tur)
 252 passed, 42 xfailed, 4 deselected in 13.5s      (ui-overhaul dalı, 1. tur)
 94 passed, 59 xfailed, 2 xpassed, 4 deselected     (ilk sürüm, main)
