@@ -395,6 +395,219 @@ def _map_lang_for_mymemory(target_lang: str) -> str:
     return "tr-TR"
 
 
+# ---------------- Sentence-aware subtitle translation ----------------
+# Subtitles split one sentence over 2 lines and often over several cues ("It happened right
+# here / in my town two years ago."). Translating line by line produced broken fragments
+# ("Tam burada oldu / iki yıl önce benim kasabamdaydı."). Now every cue's lines are joined,
+# consecutive cues that continue a sentence are translated together, and the translation is
+# split back over the cues (by original length) and re-wrapped into at most two lines.
+SUB_LINE_LIMIT = 42            # usual subtitle line length
+_MAX_GROUP_CUES = 8
+_MAX_GROUP_CHARS = 500
+_MAX_GAP_SEC = 2.0             # a longer pause usually means a new sentence
+_TS_PARSE = re.compile(r"((?:\d{1,2}:)?\d{1,2}:\d{2}[.,]\d{1,3})\s*-->\s*((?:\d{1,2}:)?\d{1,2}:\d{2}[.,]\d{1,3})")
+_LEAD_ASS = re.compile(r"^((?:\{\\[^}]*\})+)")
+_PER_LINE_KINDS = ("dialogue", "music")   # each line is its own utterance / lyric
+_LINE_AFFIX = re.compile(r"^((?:</?i>)*\s*(?:-|♪+)?\s*)(.*?)(\s*♪*\s*(?:</?i>)*)$")
+_SENTENCE_END = ('.', '!', '?', '…', '♪', '"', '”', '»', '。', '！', '？')
+
+
+def _ts_seconds(ts: str) -> float:
+    parts = ts.replace(",", ".").split(":")
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + float(p)
+    return secs
+
+
+def _ends_sentence(text: str) -> bool:
+    t = re.sub(r"</?[a-zA-Z][^>]*>", "", text).rstrip()
+    return (not t) or t.endswith(_SENTENCE_END) or t.endswith("--") or t.endswith("—")
+
+
+def _split_by_weights(text: str, weights: List[int]) -> List[str]:
+    """Split a translated sentence over len(weights) cues, proportionally to the original cue
+    lengths, preferring to cut right after punctuation and never leaving a cue empty."""
+    words = text.split()
+    k = len(weights)
+    if k <= 1 or len(words) <= 1:
+        return [text] + [""] * (k - 1) if k > 1 else [text]
+    ends, pos = [], 0
+    for w in words:
+        pos += len(w) + 1
+        ends.append(pos)
+    total_w = float(sum(weights)) or 1.0
+    cuts, acc, prev = [], 0.0, 0
+    for i in range(k - 1):
+        acc += weights[i] / total_w
+        ideal = acc * ends[-1]
+        lo, hi = prev + 1, len(words) - (k - 1 - i)
+        if lo > hi:
+            cuts.append(min(prev + 1, len(words)))
+            prev = cuts[-1]
+            continue
+        best, best_score = lo, None
+        for b in range(lo, hi + 1):
+            score = abs(ends[b - 1] - ideal)
+            if words[b - 1].endswith((",", ";", ":", ".", "!", "?", "…")):
+                score -= 8  # a natural break is worth a few characters of imbalance
+            if best_score is None or score < best_score:
+                best, best_score = b, score
+        cuts.append(best)
+        prev = best
+    bounds = [0] + cuts + [len(words)]
+    return [" ".join(words[bounds[i]:bounds[i + 1]]) for i in range(k)]
+
+
+def _wrap_cue_text(text: str, limit: int = SUB_LINE_LIMIT) -> List[str]:
+    """One line if it fits, otherwise two balanced lines (subtitle convention: max 2 lines)."""
+    text = " ".join(text.split())
+    if len(text) <= limit or " " not in text:
+        return [text]
+    words = text.split()
+    if len(text) > 3 * limit:  # cannot sensibly fit in two lines
+        out, cur = [], ""
+        for w in words:
+            if cur and len(cur) + 1 + len(w) > limit:
+                out.append(cur)
+                cur = w
+            else:
+                cur = (cur + " " + w) if cur else w
+        return out + ([cur] if cur else [])
+    best, best_score = 1, None
+    for b in range(1, len(words)):
+        l1, l2 = " ".join(words[:b]), " ".join(words[b:])
+        score = max(len(l1), len(l2)) + (0 if l1.endswith((",", ".", "!", "?", ";", ":")) else 4)
+        if best_score is None or score < best_score:
+            best, best_score = b, score
+    return [" ".join(words[:best]), " ".join(words[best:])]
+
+
+def _parse_cues(lines: List[str]) -> List[Dict[str, object]]:
+    """Locate cues: a timestamp line followed by text lines up to a blank line."""
+    cues: List[Dict[str, object]] = []
+    n, i = len(lines), 0
+    while i < n:
+        s = lines[i].strip("\r\n")
+        m = _TS_PARSE.search(s) if is_timestamp(s) else None
+        if not m:
+            i += 1
+            continue
+        j, idxs = i + 1, []
+        while j < n:
+            t = lines[j].strip("\r\n")
+            if not t.strip() or is_timestamp(t):
+                break
+            if is_sequence_number(t) and j + 1 < n and is_timestamp(lines[j + 1].strip("\r\n")):
+                break  # missing blank line before the next cue
+            idxs.append(j)
+            j += 1
+        if idxs:
+            raw = [lines[k].strip("\r\n").strip() for k in idxs]
+            first_tags = _LEAD_ASS.match(raw[0])
+            pos_tag = first_tags.group(1) if first_tags else ""
+            if pos_tag:
+                raw[0] = raw[0][len(pos_tag):]
+            whole = "\n".join(raw)
+            # Whole-cue italics (one <i>...</i> around the cue, or around every line): keep tags out of the engine
+            edges = [re.sub(r"^<i>|</i>$", "", r) for r in raw]
+            italic = (whole.startswith("<i>") and whole.endswith("</i>")
+                      and not any("<i>" in e or "</i>" in e for e in edges))
+            if italic:
+                raw = [e.strip() for e in edges]
+            plain = [re.sub(r"</?i>", "", r).strip() for r in raw]
+            if len(raw) >= 2 and any(p.startswith("-") for p in plain[1:]):
+                kind = "dialogue"
+            elif "♪" in whole:
+                kind = "music"
+            else:
+                kind = "normal"
+            cues.append({
+                "idxs": idxs, "start": _ts_seconds(m.group(1)), "end": _ts_seconds(m.group(2)),
+                "raw": raw, "text": " ".join(r for r in raw if r), "italic": italic, "pos": pos_tag, "kind": kind,
+                "nl": "\r\n" if lines[i].endswith("\r\n") else "\n",
+            })
+        i = j
+    return cues
+
+
+def _group_sentences(cues: List[Dict[str, object]]) -> List[List[int]]:
+    groups: List[List[int]] = []
+    for ci, c in enumerate(cues):
+        if groups:
+            g = groups[-1]
+            prev = cues[g[-1]]
+            if (c["kind"] == "normal" and prev["kind"] == "normal" and c["italic"] == prev["italic"]
+                    and not _ends_sentence(str(prev["text"]))
+                    and float(c["start"]) - float(prev["end"]) <= _MAX_GAP_SEC
+                    and len(g) < _MAX_GROUP_CUES
+                    and sum(len(str(cues[x]["text"])) for x in g) + len(str(c["text"])) <= _MAX_GROUP_CHARS):
+                g.append(ci)
+                continue
+        groups.append([ci])
+    return groups
+
+
+def _translate_cues(lines, cues, translate_map_fn, line_limit: int) -> List[str]:
+    groups = _group_sentences(cues)
+    texts: List[str] = []
+    line_parts: Dict[int, List[Tuple[str, str, str, str]]] = {}
+    for g in groups:
+        if cues[g[0]]["kind"] in _PER_LINE_KINDS:
+            parts = []
+            for r in cues[g[0]]["raw"]:  # type: ignore[union-attr]
+                m = _LINE_AFFIX.match(r)
+                pre, core, post = (m.group(1), m.group(2), m.group(3)) if m else ("", r, "")
+                parts.append((pre, core, post, r))
+                if core:
+                    texts.append(core)
+            line_parts[g[0]] = parts
+        else:
+            texts.append(" ".join(str(cues[c]["text"]) for c in g))
+    tmap = translate_map_fn(texts)
+
+    new_text: Dict[int, List[str]] = {}
+    for g in groups:
+        if cues[g[0]]["kind"] in _PER_LINE_KINDS:
+            new_text[g[0]] = [pre + tmap.get(core, core) + post if core else raw
+                              for pre, core, post, raw in line_parts[g[0]]]
+            continue
+        src = " ".join(str(cues[c]["text"]) for c in g)
+        dst = tmap.get(src, src)
+        pieces = _split_by_weights(dst, [max(1, len(str(cues[c]["text"]))) for c in g])
+        for c, piece in zip(g, pieces):
+            new_text[c] = _wrap_cue_text(piece, line_limit) if piece else [""]
+    for ci, out in new_text.items():
+        if cues[ci]["italic"]:
+            out[0] = "<i>" + out[0]
+            out[-1] = out[-1] + "</i>"  # separately: out[0] may be out[-1]
+    for ci, c in enumerate(cues):
+        if c["pos"] and ci in new_text:
+            new_text[ci][0] = str(c["pos"]) + new_text[ci][0]
+
+    # Rebuild: replace each cue's text block, keep every other line byte-identical
+    replace_at = {int(c["idxs"][0]): ci for ci, c in enumerate(cues)}  # type: ignore[index]
+    skip = {k for c in cues for k in c["idxs"][1:]}  # type: ignore[union-attr]
+    result: List[str] = []
+    for k, line in enumerate(lines):
+        if k in skip:
+            continue
+        if k in replace_at:
+            ci = replace_at[k]
+            c = cues[ci]
+            last_idx = c["idxs"][-1]  # type: ignore[index]
+            nl = str(c["nl"])
+            block = new_text.get(ci) or list(c["raw"])  # type: ignore[arg-type]
+            for bi, t in enumerate(block):
+                is_last = bi == len(block) - 1
+                ending = nl if (not is_last or lines[last_idx].endswith(("\n", "\r"))) else ""
+                result.append(t + ending)
+            continue
+        result.append(line)
+    return result
+
+
+
 def translate_lines(
     lines: List[str],
     target_lang: str = "tr",
@@ -412,6 +625,17 @@ def translate_lines(
     - Uses unified translation map builder (dedupe, batching, engine selection).
     - Supports optional progress callback and cancellation.
     """
+    # Subtitles: translate whole sentences (cue- and sentence-aware), see _translate_cues
+    cues = _parse_cues(lines)
+    if cues:
+        def _map(texts: List[str]) -> Dict[str, str]:
+            return _build_translation_map(
+                texts, target_lang=target_lang, batch_size=batch_size, mm_workers=mm_workers,
+                engine_mode=engine_mode, auto_priority=auto_priority,
+                progress_callback=progress_callback, cancel_check=cancel_check,
+            )
+        return _translate_cues(lines, cues, _map, wrap_limit or SUB_LINE_LIMIT)
+
     # Identify translatable lines (exclude sequence numbers, timestamps, blanks)
     to_translate_indices: List[int] = []
     cores: List[str] = []
@@ -4526,7 +4750,6 @@ class TranslatorGUI:
                                 auto_priority=cfg["priority"],
                                 progress_callback=_file_progress,
                                 cancel_check=_cancel_check,
-                                wrap_limit=70,
                             )
                             # Apply custom dictionary (post)
                             if cfg["dict_mode"] in ("post", "both") and self.custom_terms:

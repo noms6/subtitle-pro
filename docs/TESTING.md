@@ -27,16 +27,17 @@ Linux'ta GUI testleri için sanal ekran: `xvfb-run -a python -m pytest`.
 | Dosya | Kapsam | Test |
 |---|---|---|
 | `test_parsing.py` | Zaman damgası/sıra no/VTT meta, boşluk, kodlama tespiti, requirements ayrıştırma, dil eşlemeleri | 55 |
-| `test_translate_lines.py` | Satır yapısının korunması, CRLF, tekilleştirme, etiketler, satır kırma, Markdown/CSV | 17 |
+| `test_translate_lines.py` | Replik yapısı, CRLF, tekilleştirme, etiketler, cümle gruplama, diyalog, dengeli 2 satır, Markdown/CSV | 24 |
 | `test_engine.py` | Motor yönlendirme, 429, fallback, istek sayısı, thread yarışı, ilerleme, iptal | 28 |
 | `test_formats.py` | TXT, DOCX (gövde/tablo/üstbilgi/köprü), PDF (Türkçe glif, kelime bölme), CLI | 19 |
 | `test_gui.py` | Kurulum, uçtan uca çeviri, paralel dosya, çıktı klasörü, worker↔Tk thread ayrımı, iptal, ayarlar, tema, kuyruk, sözlük | 36 |
 | `test_ui_i18n.py` | 37 dil paketi, emoji önek araması, önbellek, canlı dil değişiminde tüm görünür metinler, **ikincil pencereler**, kırpılma, kaydırma, log, tema, menü, **tek seferde açılış** | 152 |
 | `test_network.py` | Canlı Google/MyMemory, birleşik istek kavram kanıtı, küçük dosya | 4 (varsayılan kapalı) |
 
-## Son Sonuç (2026-10-13, Windows 10, Python 3.10.11)
+## Son Sonuç (2026-10-18, Windows 10, Python 3.10.11)
 
 ```
+284 passed, 32 xfailed, 4 deselected in 36.1s      (cümle bazlı altyazı çevirisi: H12 kısmen, H13, H17, H28, H29, H30 düzeldi)
 270 passed, 40 xfailed, 4 deselected in 38.7s      (main, hızlı motor + 20 dilli README sonrası)
 264 passed, 42 xfailed, 4 deselected in 17.7s      (ui-overhaul dalı, 2. tur)
 252 passed, 42 xfailed, 4 deselected in 13.5s      (ui-overhaul dalı, 1. tur)

@@ -42,7 +42,6 @@ def test_sequence_number():
     assert not T.is_sequence_number("12a")
 
 
-@pytest.mark.xfail(strict=True, reason="H17: a dialogue line made only of digits (e.g. '2024', '911') is treated as a cue index and never translated")
 def test_numeric_dialogue_line_is_translatable(engines, T_module):
     lines = ["1\n", "00:00:01,000 --> 00:00:02,000\n", "1984\n", "\n"]
     T.translate_lines(lines, target_lang="tr", engine_mode="google")
@@ -50,7 +49,6 @@ def test_numeric_dialogue_line_is_translatable(engines, T_module):
     assert ("google", "1984") in engines.calls
 
 
-@pytest.mark.xfail(strict=True, reason="H28: UTF-8 BOM is kept as U+FEFF, so the first cue index '\\ufeff1' is sent to the translator")
 def test_bom_first_index_not_translated(tmp_path, engines):
     p = tmp_path / "bom.srt"
     p.write_bytes("1\r\n00:00:01,000 --> 00:00:02,000\r\nHi\r\n".encode("utf-8-sig"))
@@ -70,7 +68,6 @@ def test_dialogue_starting_with_note_is_translated():
     assert not T.is_vtt_meta("Note to self: buy milk.")
 
 
-@pytest.mark.xfail(strict=True, reason="H29: VTT header fields (Kind:/Language:) are translated, corrupting the file header")
 def test_vtt_header_fields_not_translated(engines):
     lines = ["WEBVTT\n", "Kind: captions\n", "Language: en\n", "\n",
              "00:00:01.000 --> 00:00:02.000\n", "Hello\n"]
@@ -78,7 +75,6 @@ def test_vtt_header_fields_not_translated(engines):
     assert [t for _, t in engines.calls] == ["Hello"]
 
 
-@pytest.mark.xfail(strict=True, reason="H29: VTT cue identifiers (text line before a timestamp) are translated")
 def test_vtt_cue_identifier_not_translated(engines):
     lines = ["WEBVTT\n", "\n", "intro-cue\n", "00:00:01.000 --> 00:00:02.000\n", "Hello\n"]
     T.translate_lines(lines, target_lang="tr", engine_mode="google")
